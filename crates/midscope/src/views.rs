@@ -151,6 +151,19 @@ pub struct Found {
     pub self_row: Option<usize>,
     /// Each row's own colour (for patches that must hide text underneath).
     pub bg: [[u32; 5]; 2],
+    /// Where it was found on screen (left, ally top, enemy top, row height), to
+    /// tell when the scoreboard has stopped animating in.
+    pub at: Option<[f32; 4]>,
+}
+
+impl Found {
+    /// Same place as another read (within a pixel and a half).
+    pub fn settled_with(&self, other: &Found) -> bool {
+        match (self.at, other.at) {
+            (Some(a), Some(b)) => a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 1.5),
+            _ => false,
+        }
+    }
 }
 
 /// Captures around where the table should be, finds its real position from
@@ -165,7 +178,7 @@ pub fn locate_scoreboard(layout: &Layout, scr: Screen) -> Found {
     let (x0, y0) = ((est_ally.x - 4.0 * pitch).max(0.0), (est_ally.y - 4.0 * pitch).max(0.0));
     let w = est_ally.w + 8.0 * pitch;
     let h = est_enemy.y + 9.0 * pitch - y0;
-    let mut found = Found { layout: layout.clone(), self_row: None, bg: [[CELL; 5]; 2] };
+    let mut found = Found { layout: layout.clone(), self_row: None, bg: [[CELL; 5]; 2], at: None };
     let Some(px) = capture::grab(x0 as i32, y0 as i32, w as i32, h as i32) else { return found };
     let img = scan::Img { px: &px, w: w as usize, h: h as usize };
     let guess = scan::Guess { left: est_ally.x - x0, right: est_ally.x + est_ally.w - x0, pitch };
@@ -190,6 +203,7 @@ pub fn locate_scoreboard(layout: &Layout, scr: Screen) -> Found {
     l.icon = Rect { x: 0.06 * p, y: 0.03 * p, w: 0.9 * p, h: 0.9 * p };
     l.name = Rect { x: 2.05 * p, y: 0.06 * p, w: 5.0 * p, h: 0.85 * p };
     found.self_row = f.self_row;
+    found.at = Some([f.left + x0, f.ally_top + y0, f.enemy_top + y0, f.pitch]);
     for t in 0..2 {
         for k in 0..5 {
             let (r, g, b) = f.bg[t][k];
@@ -414,10 +428,11 @@ pub fn loading(snap: &Snapshot, seen: &Seen, cfg: &Config, layout: &Layout, scr:
             let groups = party_groups(snap, seen, ally, |i| scr.map(l.card(ally, i)));
             for (n, (party, size, cards)) in groups.iter().enumerate() {
                 let c = cards[0];
+                // Lanes a label's width apart so two parties' labels never overlap.
                 let (edge, lane) = if ally {
-                    (c.x + c.w, c.x + c.w + (11.0 + 7.0 * n as f32) * s)
+                    (c.x + c.w, c.x + c.w + (11.0 + 13.0 * n as f32) * s)
                 } else {
-                    (c.x, c.x - (11.0 + 7.0 * n as f32) * s)
+                    (c.x, c.x - (11.0 + 13.0 * n as f32) * s)
                 };
                 bracket_side(cards, edge, lane, party_label(*size), party_color(*party), s, out);
             }
@@ -483,7 +498,7 @@ pub fn scoreboard(snap: &Snapshot, seen: &Seen, cfg: &Config, found: &Found, scr
             let groups = party_groups(snap, seen, ally, |i| scr.map(sb.extra(ally, i)));
             for (n, (party, size, rows)) in groups.iter().enumerate() {
                 let edge = rows[0].x + rows[0].w;
-                bracket_side(rows, edge, edge + (12.0 + 8.0 * n as f32) * s, party_label(*size), party_color(*party), s, out);
+                bracket_side(rows, edge, edge + (14.0 + 46.0 * n as f32) * s, party_label(*size), party_color(*party), s, out);
             }
         }
     }

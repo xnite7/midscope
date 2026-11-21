@@ -242,6 +242,9 @@ struct Reads {
     loading_checked: Option<Instant>,
     loading_up: bool,
     board: Option<(Seen, views::Found)>,
+    /// A scoreboard read waiting for a second one to confirm it has settled.
+    pending: Option<views::Found>,
+    last_scan: Option<Instant>,
     tab_since: Option<Instant>,
 }
 
@@ -446,18 +449,26 @@ fn run_inner(shared: Arc<Shared>) -> Result<()> {
                         fp(&[4, latest, scr_fp(scr), seen.len() as u64, shared.config_gen()])
                     }
                     Phase::Ingame if cfg.show_scoreboard && Keys::down(cfg.hold_key) => {
-                        // Let the game draw its scoreboard, then read it once
-                        // per Tab press (rows re-sort by score).
+                        // The scoreboard animates in. Read where it is every 100 ms
+                        // until two reads agree, then work out who's on each row once.
                         let since = *reads.tab_since.get_or_insert_with(Instant::now);
-                        if reads.board.is_none() && since.elapsed() >= Duration::from_millis(120) {
-                            // Find the table's real position first, then read who's on each row.
+                        let due = reads.last_scan.is_none_or(|t| t.elapsed() >= Duration::from_millis(100));
+                        if reads.board.is_none() && since.elapsed() >= Duration::from_millis(150) && due {
+                            reads.last_scan = Some(Instant::now());
                             let found = views::locate_scoreboard(&layout, scr);
-                            let sb = found.layout.scoreboard.clone();
-                            let seen = views::read_slots(&snap, &shared.content(), &[true, false], |ally, i| views::Probe {
-                                portrait: scr.map(sb.row(ally, i).inner(sb.icon)),
-                                is_self: ally && found.self_row == Some(i),
-                            });
-                            reads.board = Some((seen, found));
+                            let settled = reads.pending.as_ref().is_some_and(|p| found.settled_with(p));
+                            // Give up waiting after 1.2 s (e.g. a frozen frame) and use the latest.
+                            if settled || since.elapsed() >= Duration::from_millis(1200) {
+                                let sb = found.layout.scoreboard.clone();
+                                let seen = views::read_slots(&snap, &shared.content(), &[true, false], |ally, i| views::Probe {
+                                    portrait: scr.map(sb.row(ally, i).inner(sb.icon)),
+                                    is_self: ally && found.self_row == Some(i),
+                                });
+                                reads.board = Some((seen, found));
+                                reads.pending = None;
+                            } else {
+                                reads.pending = Some(found);
+                            }
                         }
                         match &reads.board {
                             Some((b, found)) => {
@@ -470,6 +481,8 @@ fn run_inner(shared: Arc<Shared>) -> Result<()> {
                     Phase::Ingame => {
                         reads.tab_since = None;
                         reads.board = None;
+                        reads.pending = None;
+                        reads.last_scan = None;
                         if !cfg.show_loading {
                             1
                         } else {
