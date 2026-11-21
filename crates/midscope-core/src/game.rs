@@ -190,6 +190,9 @@ pub fn snapshot(
                 p.skins.clone_from(&old.skins);
                 p.rank.clone_from(&old.rank);
                 p.history.clone_from(&old.history);
+                p.party = old.party;
+                p.party_size = old.party_size;
+                p.tags.clone_from(&old.tags);
             }
         }
     }
@@ -199,7 +202,8 @@ pub fn snapshot(
             fill_skins(&l, content, &mut players);
         }
     }
-    fill_ranks_and_parties(riot, &mid, &mut players);
+    // Ranks and parties are filled in afterwards by `enrich`, so the match
+    // can be shown straight away.
     players.sort_by_key(|p| (!p.ally, p.slot));
     let queue = m
         .pointer("/MatchmakingData/QueueID")
@@ -244,26 +248,63 @@ fn fill_names(riot: &mut Riot, cfg: &Config, players: &mut [Player]) {
 
 /// Ranks and recent matches, fetched once per player per match, then
 /// party grouping and tags.
-fn fill_ranks_and_parties(riot: &mut Riot, mid: &str, players: &mut [Player]) {
-    for p in players.iter_mut() {
-        if p.rank.is_none() {
-            if let Ok(v) = riot.pd_get(&format!("/mmr/v1/players/{}", p.puuid)) {
-                p.rank = Some(rank::parse_mmr(&v));
-            }
+/// Whether some player still lacks a rank or match history.
+pub fn needs_enrich(s: &Snapshot) -> bool {
+    s.players.iter().any(|p| p.rank.is_none() || p.history.is_none())
+}
+
+/// Fills in ranks, recent matches, parties and tags. Every player is looked
+/// up at the same time (one thread each), so ten players take about as long
+/// as one.
+pub fn enrich(riot: &Riot, snap: &mut Snapshot) {
+    let mid = snap.match_id.clone();
+    let todo: Vec<(usize, String, bool, bool)> = snap
+        .players
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.rank.is_none() || p.history.is_none())
+        .map(|(i, p)| (i, p.puuid.clone(), p.rank.is_none(), p.history.is_none()))
+        .collect();
+    let results: Vec<(usize, Option<Rank>, Option<Vec<String>>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = todo
+            .into_iter()
+            .map(|(i, puuid, want_rank, want_hist)| {
+                let mut r = riot.clone();
+                scope.spawn(move || {
+                    let rank = want_rank
+                        .then(|| r.pd_get(&format!("/mmr/v1/players/{puuid}")).ok().map(|v| rank::parse_mmr(&v)))
+                        .flatten();
+                    let hist = want_hist
+                        .then(|| {
+                            r.pd_get(&format!("/match-history/v1/history/{puuid}?startIndex=0&endIndex=10")).ok().map(|v| {
+                                v["History"]
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(|m| m["MatchID"].as_str().map(str::to_owned))
+                                    .collect::<Vec<_>>()
+                            })
+                        })
+                        .flatten();
+                    (i, rank, hist)
+                })
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    });
+    for (i, rank, hist) in results {
+        let p = &mut snap.players[i];
+        if rank.is_some() {
+            p.rank = rank;
         }
-        if p.history.is_none() {
-            if let Ok(v) = riot.pd_get(&format!("/match-history/v1/history/{}?startIndex=0&endIndex=10", p.puuid)) {
-                p.history = Some(
-                    v["History"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|m| m["MatchID"].as_str().map(str::to_owned))
-                        .collect(),
-                );
-            }
+        if hist.is_some() {
+            p.history = hist;
         }
     }
+    fill_ranks_and_parties(riot, &mid, &mut snap.players);
+}
+
+fn fill_ranks_and_parties(riot: &Riot, mid: &str, players: &mut [Player]) {
     let mine = own_party(riot);
     let known: Vec<Vec<usize>> = vec![players
         .iter()

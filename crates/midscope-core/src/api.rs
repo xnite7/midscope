@@ -41,6 +41,7 @@ pub struct Session {
     pub client_version: String,
 }
 
+#[derive(Clone)]
 pub struct Riot {
     local: ureq::Agent,
     remote: ureq::Agent,

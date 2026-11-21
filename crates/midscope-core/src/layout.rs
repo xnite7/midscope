@@ -141,7 +141,8 @@ impl Default for Loading {
             ally_icon: Rect { x: 12.3, y: 2.5, w: 112.0, h: 108.0 },
             enemy_icon: Rect { x: 408.0, y: 2.5, w: 112.0, h: 108.0 },
             name: Rect { x: 6.0, y: 118.0, w: 260.0, h: 30.0 },
-            enemy_strip: Rect { x: 525.0, y: 30.0, w: 4.0, h: 4.0 },
+            // The 8-unit red edge on enemy cards (measured at 525..533).
+            enemy_strip: Rect { x: 526.0, y: 30.0, w: 6.0, h: 4.0 },
             chip_w: 186.0,
             // Measured from a deathmatch screenshot (1920x1080).
             dm_left_card: Anchor::new(Start, Start, 34.0, 150.0, 466.0, 126.0).boxed(),

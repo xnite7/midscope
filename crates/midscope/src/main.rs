@@ -193,22 +193,24 @@ fn poll_forever(shared: &Shared) {
             // one read, then a cheap check that the match id is unchanged.
             let need = match phase {
                 Phase::Pregame => true,
-                // Retry until every rank loaded (Riot may rate-limit the first burst).
-                Phase::Ingame => {
-                    last.phase != Phase::Ingame
-                        || last.players.is_empty()
-                        || last.players.iter().any(|p| p.rank.is_none())
-                }
+                Phase::Ingame => last.phase != Phase::Ingame || last.players.is_empty(),
                 _ => last.phase != phase,
             };
             if need {
                 match game::snapshot(&mut riot, &content, cfg, phase, Some(&last)) {
                     Ok(s) => {
+                        // Show the match straight away (agents, names, skins)...
                         last = s.clone();
                         shared.publish(s);
                     }
                     Err(e) => shared.set_status(format!("Error: {e}")),
                 }
+            }
+            // ...then ranks, parties and tags, everyone looked up at once.
+            // Retried next poll for anyone Riot didn't answer for (rate limits).
+            if !last.players.is_empty() && game::needs_enrich(&last) {
+                game::enrich(&riot, &mut last);
+                shared.publish(last.clone());
             }
             let secs = match phase {
                 Phase::Pregame => 1,

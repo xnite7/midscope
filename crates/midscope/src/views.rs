@@ -351,8 +351,11 @@ pub fn loading_visible(layout: &Layout, scr: Screen) -> bool {
     let l = &layout.loading;
     (0..5)
         .filter(|&i| {
+            // A thin strip: read a few pixels across it and take any red one.
             let r = scr.map(l.card(false, i).inner(l.enemy_strip));
-            pixel(r.x + 1.0, r.y + 1.0).is_some_and(|[r, g, b]| r > 150 && r as i32 - g as i32 > 70 && r as i32 - b as i32 > 50)
+            let red = |[r, g, b]: [u8; 3]| r > 150 && r as i32 - g as i32 > 70 && r as i32 - b as i32 > 50;
+            capture::grab(r.x as i32, (r.y + r.h / 2.0) as i32, r.w.max(3.0) as i32, 1)
+                .is_some_and(|px| px.chunks(4).any(|p| red([p[2], p[1], p[0]])))
         })
         .count()
         >= 3
