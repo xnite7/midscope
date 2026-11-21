@@ -444,61 +444,73 @@ pub fn loading(snap: &Snapshot, seen: &Seen, cfg: &Config, layout: &Layout, scr:
 const ALLY_TINT: u32 = 0x37B4A5;
 const ENEMY_TINT: u32 = 0xC8475A;
 
-/// Tab scoreboard: RANK / VANDAL / PHANTOM / TAGS columns flush with the
-/// table, on each row's own colour; party lines to their right.
+/// Tab scoreboard, worked into the game's table:
+/// - a rank icon in the empty gap between the name and ultimate columns;
+/// - VANDAL / PHANTOM / TAGS columns flush with the table's right edge;
+/// - party lines down the left side, outside the speaker icons.
 pub fn scoreboard(snap: &Snapshot, seen: &Seen, cfg: &Config, found: &Found, scr: Screen, out: &mut Vec<Prim>) {
     let layout = &found.layout;
     let sb = &layout.scoreboard;
     let s = scr.scale;
+    let p = sb.pitch * s; // row height in pixels
     let cols = |r: Rect| {
-        let w = r.w;
+        let x = r.x + 10.0 * s;
+        let w = r.w - 10.0 * s;
         [
-            Rect { x: r.x + 6.0 * s, w: w * 0.32, ..r },
-            Rect { x: r.x + w * 0.33, w: w * 0.22, ..r },
-            Rect { x: r.x + w * 0.56, w: w * 0.22, ..r },
-            Rect { x: r.x + w * 0.79, w: w * 0.21, ..r },
+            Rect { x, w: w * 0.37, ..r },
+            Rect { x: x + w * 0.37, w: w * 0.37, ..r },
+            Rect { x: x + w * 0.74, w: w * 0.26, ..r },
         ]
     };
-    let head = scr.map(sb.extra(true, 0));
-    let head = Rect { y: head.y - 26.0 * s, h: 24.0 * s, ..head };
-    out.push(Prim::Fill(head, INK, 0.75));
-    let titles: &[&str] = if cfg.show_skins { &["rank", "vandal", "phantom", "tags"] } else { &["rank", "", "", "tags"] };
-    for (r, t) in cols(head).into_iter().zip(titles) {
-        out.push(text(*t, Font::Label, Rect { x: r.x, w: r.w * 0.0 + 70.0 * s, ..r }, MUTED));
+    let extra = |ally: bool, i: usize| {
+        let r = scr.map(sb.extra(ally, i));
+        Rect { w: 250.0 * s, ..r }
+    };
+    if cfg.show_skins || snap.players.iter().any(|p| !p.tags.is_empty()) {
+        let head = extra(true, 0);
+        let head = Rect { y: head.y - 26.0 * s, h: 24.0 * s, ..head };
+        out.push(Prim::Fill(head, INK, 0.75));
+        let titles: [&str; 3] = if cfg.show_skins { ["vandal", "phantom", "tags"] } else { ["", "", "tags"] };
+        for (r, t) in cols(head).into_iter().zip(titles) {
+            out.push(text(t, Font::Label, Rect { w: 60.0 * s, ..r }, MUTED));
+        }
     }
     for ally in [true, false] {
         for i in 0..5 {
-            let Some((p, _)) = player(snap, seen, ally, i) else { continue };
-            let cell = scr.map(sb.extra(ally, i));
+            let Some((p_, _)) = player(snap, seen, ally, i) else { continue };
+            let row = scr.map(sb.row(ally, i));
+            // Rank icon in the gap after the name (names rarely run past ~6 rows in).
+            if let Some(r) = p_.rank.as_ref().filter(|r| r.tier >= 3) {
+                let ic = p * 0.86;
+                out.push(paint::Rank(r.tier, Rect { x: row.x + 6.7 * p, y: row.y + (row.h - ic) / 2.0, w: ic, h: ic }));
+            }
+            let cell = extra(ally, i);
             // Translucent team tint, like the game's own rows: the world shows through.
             let (tint, a) = if ally { (ALLY_TINT, 0.52) } else { (ENEMY_TINT, 0.50) };
             out.push(Prim::Fill(cell, tint, a));
             let bg = found.bg[usize::from(!ally)][i];
-            let [c1, c2, c3, c4] = cols(cell);
-            let (name, _, tier) = rank_name(p);
-            let ic = c1.h - 8.0 * s;
-            if tier > 0 {
-                out.push(paint::Rank(tier, Rect { x: c1.x, y: c1.y + 4.0 * s, w: ic, h: ic }));
-            }
-            out.push(text(name, Font::Small, Rect { x: c1.x + ic + 6.0 * s, w: c1.w - ic - 6.0 * s, ..c1 }, TEXT));
+            let [c1, c2, c3] = cols(cell);
             if cfg.show_skins {
-                let (v, vc) = short_skin(p, "Vandal");
-                let (ph, pc) = short_skin(p, "Phantom");
-                out.push(text(v, Font::Small, c2, vc));
-                out.push(text(ph, Font::Small, c3, pc));
+                let (v, vc) = short_skin(p_, "Vandal");
+                let (ph, pc) = short_skin(p_, "Phantom");
+                out.push(text(v, Font::Small, c1, vc));
+                out.push(text(ph, Font::Small, c2, pc));
             }
-            tags(p, c4, s * 0.85, out);
-            if p.revealed {
+            tags(p_, c3, s * 0.85, out);
+            if p_.revealed {
                 let nm = scr.map(sb.row(ally, i).inner(sb.name));
                 out.push(Prim::Fill(nm, bg, 1.0));
-                out.push(text(p.name.clone(), Font::Name, nm, YELLOW));
+                out.push(text(p_.name.clone(), Font::Name, nm, YELLOW));
             }
         }
         if cfg.show_party_lines {
-            let groups = party_groups(snap, seen, ally, |i| scr.map(sb.extra(ally, i)));
+            // Down the left side: ticks stop short of the speaker icons, the
+            // lane runs outside them, one lane per party a label's width apart.
+            let groups = party_groups(snap, seen, ally, |i| scr.map(sb.row(ally, i)));
             for (n, (party, size, rows)) in groups.iter().enumerate() {
-                let edge = rows[0].x + rows[0].w;
-                bracket_side(rows, edge, edge + (14.0 + 46.0 * n as f32) * s, party_label(*size), party_color(*party), s, out);
+                let edge = rows[0].x - 1.05 * p;
+                let lane = edge - (26.0 + 46.0 * n as f32) * s;
+                bracket_side(rows, edge, lane, party_label(*size), party_color(*party), s, out);
             }
         }
     }
