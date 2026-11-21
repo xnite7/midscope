@@ -293,11 +293,10 @@ pub fn scoreboard_dm(snap: &Snapshot, seen: &Seen, cfg: &Config, found: &FoundDm
         let Some((p_, _)) = player(snap, seen, true, i) else { continue };
         let p = row.h / 0.97;
         let ic = p * 0.86;
-        let gap_x = row.x + 5.6 * p;
         if let Some(r) = p_.rank.as_ref().filter(|r| r.tier >= 3) {
-            out.push(paint::Rank(r.tier, Rect { x: gap_x, y: row.y + (row.h - ic) / 2.0, w: ic, h: ic }));
+            out.push(paint::Rank(r.tier, Rect { x: row.x + 1.06 * p, y: row.y + (row.h - ic) / 2.0, w: ic, h: ic }));
         }
-        tags(p_, Rect { x: gap_x + ic + 4.0 * s, y: row.y, w: 2.4 * p, h: row.h }, s * 0.85, out);
+        tags(p_, Rect { x: row.x + 5.6 * p, y: row.y, w: 3.0 * p, h: row.h }, s * 0.85, out);
         if cfg.show_skins {
             let cell = Rect { x: row.x + row.w, w: 200.0 * s, ..*row };
             let mine = found.self_row == Some(i);
@@ -642,13 +641,13 @@ pub fn scoreboard(snap: &Snapshot, seen: &Seen, cfg: &Config, found: &Found, scr
         for i in 0..5 {
             let Some((p_, _)) = player(snap, seen, ally, i) else { continue };
             let row = scr.map(sb.row(ally, i));
-            // Rank icon and tags in the gap after the name (names rarely run past ~5 rows in).
+            // Rank icon in the gap between the agent portrait and the name;
+            // tags in the empty space after the name.
             let ic = p * 0.86;
-            let gap_x = row.x + 5.6 * p;
             if let Some(r) = p_.rank.as_ref().filter(|r| r.tier >= 3) {
-                out.push(paint::Rank(r.tier, Rect { x: gap_x, y: row.y + (row.h - ic) / 2.0, w: ic, h: ic }));
+                out.push(paint::Rank(r.tier, Rect { x: row.x + 1.06 * p, y: row.y + (row.h - ic) / 2.0, w: ic, h: ic }));
             }
-            tags(p_, Rect { x: gap_x + ic + 4.0 * s, y: row.y, w: 2.4 * p, h: row.h }, s * 0.85, out);
+            tags(p_, Rect { x: row.x + 5.6 * p, y: row.y, w: 3.0 * p, h: row.h }, s * 0.85, out);
             let bg = found.bg[usize::from(!ally)][i];
             if cfg.show_skins {
                 let cell = extra(ally, i);
