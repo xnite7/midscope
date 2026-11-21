@@ -504,7 +504,8 @@ pub fn scoreboard(snap: &Snapshot, seen: &Seen, cfg: &Config, found: &Found, scr
             // lane runs outside them, one lane per party a label's width apart.
             let groups = party_groups(snap, seen, ally, |i| scr.map(sb.row(ally, i)));
             for (n, (party, size, rows)) in groups.iter().enumerate() {
-                let edge = rows[0].x - 1.05 * p;
+                // Allies have speaker icons left of the table; enemies don't.
+                let edge = if ally { rows[0].x - 1.05 * p } else { rows[0].x - 4.0 * s };
                 let lane = edge - (26.0 + 46.0 * n as f32) * s;
                 bracket_side(rows, edge, lane, party_label(*size), party_color(*party), s, out);
             }
