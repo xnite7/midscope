@@ -183,6 +183,8 @@ pub struct Found {
     pub at: Option<[f32; 4]>,
     /// Pixels per layout unit for this table (its real size on screen).
     pub ui: f32,
+    /// Vandals and Phantoms in the loadout column: (ally?, row, gun, where on screen).
+    pub guns: Vec<(bool, usize, String, Rect)>,
 }
 
 impl Found {
@@ -198,12 +200,12 @@ impl Found {
 /// Captures around where the table should be, finds its real position from
 /// the row colours (see midscope_core::scan) and returns the layout
 /// corrected to match: rows, width, portraits and names all follow.
-pub fn locate_scoreboard(layout: &Layout, scr: Screen) -> Found {
+pub fn locate_scoreboard(layout: &Layout, scr: Screen, content: &Content) -> Found {
     let sb = &layout.scoreboard;
     let s = scr.scale;
     let est_ally = scr.map(sb.row(true, 0));
     let est_enemy = scr.map(sb.row(false, 0));
-    let mut found = Found { layout: layout.clone(), self_row: None, bg: [[CELL; 5]; 2], at: None, ui: s };
+    let mut found = Found { layout: layout.clone(), self_row: None, bg: [[CELL; 5]; 2], at: None, ui: s, guns: Vec::new() };
     // One grab of the game's whole UI area: the table is found wherever it is.
     let (x0, y0) = (scr.bx.max(0.0), scr.by.max(0.0));
     let Some(px) = capture::grab(x0 as i32, y0 as i32, scr.bw as i32, scr.bh as i32) else { return found };
@@ -244,6 +246,10 @@ pub fn locate_scoreboard(layout: &Layout, scr: Screen) -> Found {
         }
     }
     found.at = Some([f.left + x0, f.ally_top + y0, f.enemy_top + y0, f.pitch]);
+    found.guns = read_guns(&img, &f, content)
+        .into_iter()
+        .map(|(ally, row, gun, r)| (ally, row, gun, Rect { x: r.x + x0, y: r.y + y0, ..r }))
+        .collect();
     tray::log(&format!(
         "scoreboard: left {} ally {} enemy {} row {:.1}px you {:?}",
         (f.left + x0) as i32,
@@ -253,6 +259,48 @@ pub fn locate_scoreboard(layout: &Layout, scr: Screen) -> Found {
         f.self_row
     ));
     found
+}
+
+/// Reads the gun in each row's loadout cell by its silhouette (white, or
+/// yellow on your row) and keeps the Vandals and Phantoms, with the box the
+/// silhouette sits in. Positions are in capture pixels.
+fn read_guns(img: &scan::Img, f: &scan::Found, content: &Content) -> Vec<(bool, usize, String, Rect)> {
+    let p = f.pitch;
+    let (cw, ch) = ((3.4 * p) as usize, (p - 6.0 * p / 34.0) as usize);
+    let mut out = Vec::new();
+    for (ally, top) in [(true, f.ally_top), (false, f.enemy_top)] {
+        for row in 0..5 {
+            let (x0, y0) = ((f.left + 14.2 * p) as usize, (top + p * row as f32 + 3.0 * p / 34.0) as usize);
+            if x0 + cw > img.w || y0 + ch > img.h {
+                continue;
+            }
+            let on = |x: usize, y: usize| {
+                let i = ((y0 + y) * img.w + x0 + x) * 4;
+                let (b, g, r) = (img.px[i] as i32, img.px[i + 1] as i32, img.px[i + 2] as i32);
+                (r > 200 && g > 200 && b > 200) || (r > 170 && g > 170 && b < r.min(g) - 40)
+            };
+            let Some(mask) = midscope_core::content::shape_mask(cw, ch, on) else { continue };
+            let Some((gun, score)) = midscope_core::content::which_gun(content, &mask) else { continue };
+            if score < 0.7 || !matches!(gun, "Vandal" | "Phantom") {
+                continue;
+            }
+            // Where the silhouette is, to lay the skin over it.
+            let (mut bx0, mut by0, mut bx1, mut by1) = (cw, ch, 0, 0);
+            for y in 0..ch {
+                for x in 0..cw {
+                    if on(x, y) {
+                        bx0 = bx0.min(x);
+                        by0 = by0.min(y);
+                        bx1 = bx1.max(x);
+                        by1 = by1.max(y);
+                    }
+                }
+            }
+            let r = Rect { x: (x0 + bx0) as f32, y: (y0 + by0) as f32, w: (bx1 - bx0 + 1) as f32, h: (by1 - by0 + 1) as f32 };
+            out.push((ally, row, gun.to_owned(), r));
+        }
+    }
+    out
 }
 
 /// A deathmatch scoreboard found on screen: one list of rows.
@@ -620,28 +668,28 @@ const ENEMY_TINT: u32 = 0xC8475A;
 
 /// Tab scoreboard, worked into the game's table:
 /// - a rank icon and tags in the empty gap between the name and ultimate columns;
-/// - VANDAL / PHANTOM columns flush with the table's right edge;
+/// - each player's Vandal / Phantom skin painted on the gun in the loadout column;
 /// - party lines down the left side, outside the speaker icons.
 pub fn scoreboard(snap: &Snapshot, seen: &Seen, cfg: &Config, found: &Found, scr: Screen, out: &mut Vec<Prim>) {
     let layout = &found.layout;
     let sb = &layout.scoreboard;
     let s = found.ui;
     let p = sb.pitch * scr.scale; // row height in pixels
-    let cols = |r: Rect| {
-        let x = r.x + 10.0 * s;
-        let w = r.w - 10.0 * s;
-        [Rect { x, w: w * 0.5, ..r }, Rect { x: x + w * 0.5, w: w * 0.5, ..r }]
-    };
-    let extra = |ally: bool, i: usize| {
-        let r = scr.map(sb.extra(ally, i));
-        Rect { w: 200.0 * s, ..r }
-    };
+    // Skins go on the guns themselves: the player's own Vandal / Phantom
+    // picture laid over the white silhouette in the loadout column.
     if cfg.show_skins {
-        let head = extra(true, 0);
-        let head = Rect { y: head.y - 26.0 * s, h: 24.0 * s, ..head };
-        out.push(Prim::Fill(head, INK, 0.75));
-        for (r, t) in cols(head).into_iter().zip(["vandal", "phantom"]) {
-            out.push(text(t, Font::Label, Rect { w: 60.0 * s, ..r }, MUTED));
+        for (ally, i, gun, at) in &found.guns {
+            let Some((p_, _)) = player(snap, seen, *ally, *i) else { continue };
+            let Some(url) = p_.skin_for(gun).and_then(|k| k.art.clone()) else { continue };
+            let Some((iw, ih)) = midscope_core::content::skin_art_size(&url) else { continue };
+            // Cover the silhouette with the row's own colour, then the skin on top,
+            // as wide as the silhouette and centred on it.
+            let pad = 2.0 * s;
+            let bg = found.bg[usize::from(!*ally)][*i];
+            out.push(Prim::Fill(Rect { x: at.x - pad, y: at.y - pad, w: at.w + 2.0 * pad, h: at.h + 2.0 * pad }, bg, 1.0));
+            let w = at.w * 1.04;
+            let h = w * ih as f32 / iw.max(1) as f32;
+            out.push(Prim::Image(paint::Img::Skin(url), Rect { x: at.x + at.w / 2.0 - w / 2.0, y: at.y + at.h / 2.0 - h / 2.0, w, h }));
         }
     }
     for ally in [true, false] {
@@ -656,17 +704,6 @@ pub fn scoreboard(snap: &Snapshot, seen: &Seen, cfg: &Config, found: &Found, scr
             }
             tags(p_, Rect { x: row.x + 5.6 * p, y: row.y, w: 3.0 * p, h: row.h }, s * 0.85, out);
             let bg = found.bg[usize::from(!ally)][i];
-            if cfg.show_skins {
-                let cell = extra(ally, i);
-                // Translucent team tint, like the game's own rows: the world shows through.
-                let (tint, a) = if ally { (ALLY_TINT, 0.52) } else { (ENEMY_TINT, 0.50) };
-                out.push(Prim::Fill(cell, tint, a));
-                let [c1, c2] = cols(cell);
-                let (v, vc) = short_skin(p_, "Vandal");
-                let (ph, pc) = short_skin(p_, "Phantom");
-                out.push(text(v, Font::Small, c1, vc));
-                out.push(text(ph, Font::Small, c2, pc));
-            }
             if p_.revealed {
                 let nm = scr.map(sb.row(ally, i).inner(sb.name));
                 out.push(Prim::Fill(nm, bg, 1.0));

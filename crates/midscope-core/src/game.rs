@@ -12,6 +12,7 @@ use crate::rank::{self, Rank};
 
 const SOCKET_SKIN: &str = "bcef87d6-209b-46c6-8b19-fbe40bd95abc";
 const SOCKET_BUDDY: &str = "dd3bf334-87f3-40bd-b043-682a57a8dc3a";
+const SOCKET_CHROMA: &str = "3ad1b2b2-acdb-4524-852f-954a76ddae0a";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Phase {
@@ -26,6 +27,8 @@ pub struct Skin {
     pub weapon: String,
     pub skin: String,
     pub buddy: Option<String>,
+    /// Picture of the equipped skin (in its chosen colour), if it isn't the default.
+    pub art: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -378,7 +381,13 @@ pub fn skins_of(items: &Value, content: &Content) -> Vec<Skin> {
             let skin = socket(SOCKET_SKIN).and_then(|id| content.name(id)).unwrap_or("").to_owned();
             let skin = if skin.is_empty() || skin.starts_with("Standard") { "Default".into() } else { skin };
             let buddy = socket(SOCKET_BUDDY).and_then(|id| content.name(id)).map(str::to_owned);
-            Some(Skin { weapon, skin, buddy })
+            let art = (skin != "Default")
+                .then(|| {
+                    let art = |id: &str| content.skin_art.get(&id.to_ascii_lowercase()).cloned();
+                    socket(SOCKET_CHROMA).and_then(art).or_else(|| socket(SOCKET_SKIN).and_then(art))
+                })
+                .flatten();
+            Some(Skin { weapon, skin, buddy, art })
         })
         .collect();
     out.sort_by(|a, b| a.weapon.cmp(&b.weapon));

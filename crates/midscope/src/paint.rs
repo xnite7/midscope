@@ -109,12 +109,14 @@ impl Font {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum Img {
     /// A rank icon by tier (downloaded once into the data folder).
     Rank(u32),
     /// The midnite "m" sticker, built into the exe.
     Logo,
+    /// A weapon skin picture (by its url; cached on disk).
+    Skin(String),
 }
 
 pub enum Prim {
@@ -255,16 +257,22 @@ impl Painter {
     }
 
     /// Loads an image once and keeps it as a GPU bitmap.
-    fn image(&self, img: Img) -> Option<ID2D1Bitmap> {
-        if let Some(b) = self.images.borrow().get(&img) {
+    fn image(&self, img: &Img) -> Option<ID2D1Bitmap> {
+        if let Some(b) = self.images.borrow().get(img) {
             return b.clone();
         }
-        let bytes = match img {
-            Img::Rank(tier) => std::fs::read(midscope_core::content::rank_icon_path(tier)).ok(),
-            Img::Logo => Some(include_bytes!("../../../assets/logo-160.png").to_vec()),
+        let decoded = match img {
+            Img::Rank(tier) => std::fs::read(midscope_core::content::rank_icon_path(*tier))
+                .ok()
+                .and_then(|b| midscope_core::content::decode_png(&b)),
+            Img::Logo => midscope_core::content::decode_png(include_bytes!("../../../assets/logo-160.png")),
+            Img::Skin(url) => midscope_core::content::load_skin_art(url),
         };
-        let bitmap = bytes
-            .and_then(|b| midscope_core::content::decode_png(&b))
+        // A skin still downloading isn't cached as missing; it's tried again next paint.
+        if decoded.is_none() && matches!(img, Img::Skin(_)) {
+            return None;
+        }
+        let bitmap = decoded
             .and_then(|(rgba, w, h)| {
                 // RGBA -> premultiplied BGRA.
                 let bgra: Vec<u8> = rgba
@@ -286,7 +294,7 @@ impl Painter {
                         .ok()
                 }
             });
-        self.images.borrow_mut().insert(img, bitmap.clone());
+        self.images.borrow_mut().insert(img.clone(), bitmap.clone());
         bitmap
     }
 
@@ -340,7 +348,7 @@ impl Painter {
                             )
                         }
                         Prim::Image(img, r) => {
-                            if let Some(b) = self.image(*img) {
+                            if let Some(b) = self.image(img) {
                                 t.DrawBitmap(&b, Some(&d2r(*r)), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
                             }
                         }

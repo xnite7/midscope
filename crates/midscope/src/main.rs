@@ -215,6 +215,17 @@ fn poll_forever(shared: &Shared) {
                 game::enrich(&riot, &mut last);
                 shared.publish(last.clone());
             }
+            // Vandal / Phantom skin pictures for the scoreboard (cached on disk).
+            if phase == Phase::Ingame || phase == Phase::Pregame {
+                let urls: Vec<String> = last
+                    .players
+                    .iter()
+                    .flat_map(|p| p.skins.iter())
+                    .filter(|k| k.weapon == "Vandal" || k.weapon == "Phantom")
+                    .filter_map(|k| k.art.clone())
+                    .collect();
+                midscope_core::content::ensure_skin_art(&urls);
+            }
             let secs = match phase {
                 Phase::Pregame => 1,
                 Phase::Ingame => cfg.poll_match_secs,

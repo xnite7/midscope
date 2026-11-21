@@ -519,7 +519,7 @@ fn run_inner(shared: Arc<Shared>) -> Result<()> {
                         // and the drawing corrects itself if the order changed.
                         let since = *reads.tab_since.get_or_insert_with(Instant::now);
                         if !reads.fresh && since.elapsed() < Duration::from_millis(1500) {
-                            let found = views::locate_scoreboard(&layout, scr);
+                            let found = views::locate_scoreboard(&layout, scr, &shared.content());
                             let settled = reads.pending.as_ref().is_some_and(|p| found.settled_with(p));
                             // Give up waiting after 1.2 s (e.g. a frozen frame) and use the latest.
                             if settled || since.elapsed() >= Duration::from_millis(1200) {
