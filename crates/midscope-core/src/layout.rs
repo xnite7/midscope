@@ -94,6 +94,12 @@ pub struct Loading {
     pub enemy_strip: Rect,
     /// Width of the chip we put in the gap beside each card.
     pub chip_w: f32,
+    /// Deathmatch: six cards a column, everyone teal, portrait on the left of every card.
+    pub dm_left_card: Anchor,
+    pub dm_right_card: Anchor,
+    pub dm_pitch: f32,
+    pub dm_icon: Rect,
+    pub dm_name: Rect,
 }
 
 /// VALORANT's main-menu top bar, where our settings tab lives.
@@ -137,11 +143,27 @@ impl Default for Loading {
             name: Rect { x: 6.0, y: 118.0, w: 260.0, h: 30.0 },
             enemy_strip: Rect { x: 525.0, y: 30.0, w: 4.0, h: 4.0 },
             chip_w: 186.0,
+            // Measured from a deathmatch screenshot (1920x1080).
+            dm_left_card: Anchor::new(Start, Start, 34.0, 150.0, 466.0, 126.0).boxed(),
+            dm_right_card: Anchor::new(Start, Start, 1412.0, 150.0, 466.0, 126.0).boxed(),
+            dm_pitch: 145.6,
+            dm_icon: Rect { x: 14.0, y: 2.0, w: 100.0, h: 96.0 },
+            dm_name: Rect { x: 6.0, y: 100.0, w: 240.0, h: 26.0 },
         }
     }
 }
 
 impl Loading {
+    /// Deathmatch card `i` (0..6) in the left or right column.
+    pub fn dm_card(&self, left: bool, i: usize) -> Anchor {
+        (if left { self.dm_left_card } else { self.dm_right_card }).moved(0.0, self.dm_pitch * i as f32)
+    }
+    /// The chip beside a deathmatch card, in the gap towards the middle.
+    pub fn dm_chip(&self, left: bool, i: usize) -> Anchor {
+        let c = self.dm_card(left, i);
+        let x = if left { c.rect.w + 28.0 } else { -self.chip_w - 28.0 };
+        c.inner(Rect { x, y: 0.0, w: self.chip_w, h: c.rect.h })
+    }
     pub fn card(&self, ally: bool, i: usize) -> Anchor {
         (if ally { self.ally_card } else { self.enemy_card }).moved(0.0, self.pitch * i as f32)
     }

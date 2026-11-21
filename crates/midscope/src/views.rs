@@ -130,6 +130,14 @@ pub fn read_slots(snap: &Snapshot, content: &Content, teams: &[bool], probe: imp
     seen
 }
 
+/// Free-for-all: every player is a candidate for every slot (stored as
+/// "ally" slots 0..n). Reuses the team matcher on a teamless copy.
+pub fn read_list(snap: &Snapshot, content: &Content, probe: impl Fn(usize) -> Probe) -> Seen {
+    let mut all = snap.clone();
+    all.players.iter_mut().for_each(|p| p.ally = true);
+    read_slots(&all, content, &[true], |_, i| probe(i))
+}
+
 /// Is this pixel the game's local-player yellow?
 pub fn is_yellow([r, g, b]: [u8; 3]) -> bool {
     r > 180 && g > 150 && (b as i32) < (g as i32) - 50
@@ -219,6 +227,123 @@ pub fn locate_scoreboard(layout: &Layout, scr: Screen) -> Found {
         f.self_row
     ));
     found
+}
+
+/// A deathmatch scoreboard found on screen: one list of rows.
+pub struct FoundDm {
+    pub rows: Vec<Rect>,
+    pub self_row: Option<usize>,
+    pub at: [f32; 3],
+}
+
+impl FoundDm {
+    pub fn settled_with(&self, o: &FoundDm) -> bool {
+        self.rows.len() == o.rows.len() && self.at.iter().zip(o.at).all(|(a, b)| (a - b).abs() <= 1.5)
+    }
+}
+
+/// Finds the deathmatch scoreboard (n rows, red, yours teal).
+pub fn locate_deathmatch(layout: &Layout, scr: Screen, n: usize) -> Option<FoundDm> {
+    let sb = &layout.scoreboard;
+    let s = scr.scale;
+    let est = scr.map(sb.row(true, 0));
+    let pitch = sb.pitch * s;
+    let (x0, y0) = ((est.x - 4.0 * pitch).max(0.0), (est.y - 9.0 * pitch).max(0.0));
+    let (w, h) = (est.w + 8.0 * pitch, (n as f32 + 14.0) * pitch);
+    let px = capture::grab(x0 as i32, y0 as i32, w as i32, h as i32)?;
+    let img = scan::Img { px: &px, w: w as usize, h: h as usize };
+    let f = scan::find_list(&img, scan::Guess { left: est.x - x0, right: est.x + est.w - x0, pitch }, n)?;
+    let (left, top) = (f.left + x0, f.top + y0);
+    let width = scan::TABLE_W * f.pitch;
+    let rows = (0..n).map(|k| Rect { x: left, y: top + f.pitch * k as f32, w: width, h: f.pitch * 0.97 }).collect();
+    tray::log(&format!("deathmatch board: left {} top {} row {:.1}px you {:?}", left as i32, top as i32, f.pitch, f.self_row));
+    Some(FoundDm { rows, self_row: f.self_row, at: [left, top, f.pitch] })
+}
+
+/// The portrait cell of a deathmatch row.
+pub fn dm_portrait(r: Rect) -> Rect {
+    let p = r.h / 0.97;
+    Rect { x: r.x + 0.06 * p, y: r.y + 0.03 * p, w: 0.9 * p, h: 0.9 * p }
+}
+
+/// Deathmatch Tab list: rank and tags in the name gap, skins on the right,
+/// your row cyan and everyone else red.
+pub fn scoreboard_dm(snap: &Snapshot, seen: &Seen, cfg: &Config, found: &FoundDm, scr: Screen, out: &mut Vec<Prim>) {
+    let s = scr.scale;
+    for (i, row) in found.rows.iter().enumerate() {
+        let Some((p_, _)) = player(snap, seen, true, i) else { continue };
+        let p = row.h / 0.97;
+        let ic = p * 0.86;
+        let gap_x = row.x + 5.6 * p;
+        if let Some(r) = p_.rank.as_ref().filter(|r| r.tier >= 3) {
+            out.push(paint::Rank(r.tier, Rect { x: gap_x, y: row.y + (row.h - ic) / 2.0, w: ic, h: ic }));
+        }
+        tags(p_, Rect { x: gap_x + ic + 4.0 * s, y: row.y, w: 2.4 * p, h: row.h }, s * 0.85, out);
+        if cfg.show_skins {
+            let cell = Rect { x: row.x + row.w, w: 200.0 * s, ..*row };
+            let mine = found.self_row == Some(i);
+            out.push(Prim::Fill(cell, if mine { ALLY_TINT } else { ENEMY_TINT }, if mine { 0.52 } else { 0.50 }));
+            let half = (cell.w - 10.0 * s) / 2.0;
+            let (v, vc) = short_skin(p_, "Vandal");
+            let (ph, pc) = short_skin(p_, "Phantom");
+            out.push(text(v, Font::Small, Rect { x: cell.x + 10.0 * s, w: half, ..cell }, vc));
+            out.push(text(ph, Font::Small, Rect { x: cell.x + 10.0 * s + half, w: half, ..cell }, pc));
+        }
+    }
+    if cfg.show_skins {
+        if let Some(first) = found.rows.first() {
+            let head = Rect { x: first.x + first.w, y: first.y - 26.0 * s, w: 200.0 * s, h: 24.0 * s };
+            out.push(Prim::Fill(head, INK, 0.75));
+            let half = (head.w - 10.0 * s) / 2.0;
+            out.push(text("vandal", Font::Label, Rect { x: head.x + 10.0 * s, w: 60.0 * s, ..head }, MUTED));
+            out.push(text("phantom", Font::Label, Rect { x: head.x + 10.0 * s + half, w: 60.0 * s, ..head }, MUTED));
+        }
+    }
+}
+
+/// Deathmatch VS screen: six teal cards a side, everyone for themselves.
+pub fn loading_visible_dm(layout: &Layout, scr: Screen) -> bool {
+    let l = &layout.loading;
+    let teal = |left: bool, i: usize| {
+        let r = scr.map(l.dm_card(left, i));
+        pixel(r.x + 2.0, r.y + r.h * 0.5).is_some_and(|[r, g, b]| g as i32 > r as i32 + 60 && b as i32 > r as i32 + 40)
+    };
+    (0..6).flat_map(|i| [teal(true, i), teal(false, i)]).filter(|t| *t).count() >= 9
+}
+
+/// Slot k of the deathmatch VS screen: left column 0..6, right column 6..12.
+pub fn dm_slot(layout: &Layout, k: usize) -> midscope_core::layout::Anchor {
+    layout.loading.dm_card(k < 6, k % 6)
+}
+
+pub fn loading_dm(snap: &Snapshot, seen: &Seen, cfg: &Config, layout: &Layout, scr: Screen, out: &mut Vec<Prim>) {
+    let l = &layout.loading;
+    let s = scr.lscale;
+    for k in 0..12 {
+        let Some((p, _)) = player(snap, seen, true, k) else { continue };
+        let (left, i) = (k < 6, k % 6);
+        let chip = scr.map(l.dm_chip(left, i));
+        out.push(Prim::Fill(chip, INK, 0.86));
+        let edge_x = if left { chip.x } else { chip.x + chip.w - 3.0 * s };
+        out.push(Prim::Fill(Rect { x: edge_x, w: 3.0 * s, ..chip }, TEAL, 1.0));
+        let pad = 12.0 * s;
+        let (name, col, tier) = rank_name(p);
+        let icon = Rect { x: chip.x + pad, y: chip.y + 8.0 * s, w: 52.0 * s, h: 52.0 * s };
+        if tier > 0 {
+            out.push(paint::Rank(tier, icon));
+        }
+        let tx = icon.x + icon.w + 8.0 * s;
+        let tw = chip.x + chip.w - tx - 6.0 * s;
+        out.push(text(name, Font::Heading, Rect { x: tx, y: chip.y + 10.0 * s, w: tw, h: 24.0 * s }, col));
+        if let Some(r) = p.rank.as_ref().filter(|r| r.tier >= 3) {
+            out.push(text(format!("{} rr", r.rr), Font::Small, Rect { x: tx, y: chip.y + 34.0 * s, w: tw, h: 20.0 * s }, MUTED));
+        }
+        tags(p, Rect { x: chip.x + pad, y: chip.y + 68.0 * s, w: chip.w, h: 20.0 * s }, s, out);
+        if cfg.show_skins {
+            let (v, vc) = short_skin(p, "Vandal");
+            out.push(text(format!("vandal  {v}"), Font::Small, Rect { x: chip.x + pad, y: chip.y + chip.h - 24.0 * s, w: chip.w - pad, h: 20.0 * s }, vc));
+        }
+    }
 }
 
 /// The VS loading screen is up when the enemy cards' red edge strips are.

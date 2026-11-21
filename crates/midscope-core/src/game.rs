@@ -67,11 +67,18 @@ pub struct Snapshot {
     pub phase: Phase,
     pub match_id: String,
     pub players: Vec<Player>,
+    /// Queue id from Riot ("competitive", "swiftplay", "deathmatch", ...).
+    pub queue: String,
 }
 
 impl Snapshot {
     pub fn empty(phase: Phase) -> Snapshot {
-        Snapshot { phase, match_id: String::new(), players: Vec::new() }
+        Snapshot { phase, match_id: String::new(), players: Vec::new(), queue: String::new() }
+    }
+
+    /// Free-for-all: no teams, six cards a side on the loading screen.
+    pub fn is_deathmatch(&self) -> bool {
+        self.queue == "deathmatch" || (self.phase == Phase::Ingame && self.players.len() > 10)
     }
 }
 
@@ -194,7 +201,13 @@ pub fn snapshot(
     }
     fill_ranks_and_parties(riot, &mid, &mut players);
     players.sort_by_key(|p| (!p.ally, p.slot));
-    Ok(Snapshot { phase, match_id: mid, players })
+    let queue = m
+        .pointer("/MatchmakingData/QueueID")
+        .or_else(|| m.get("QueueID"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    Ok(Snapshot { phase, match_id: mid, players, queue })
 }
 
 /// Asks name-service for Riot IDs. Streamer-mode players are only asked for

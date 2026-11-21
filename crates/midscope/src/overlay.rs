@@ -244,7 +244,14 @@ struct Reads {
     board: Option<(Seen, views::Found)>,
     /// A scoreboard read waiting for a second one to confirm it has settled.
     pending: Option<views::Found>,
-    last_scan: Option<Instant>,
+    board_dm: Option<(Seen, views::FoundDm)>,
+    /// When the VS screen was first read, and how many reads so far.
+    loading_reads: (Option<Instant>, u8),
+    /// This Tab press already has a settled read.
+    fresh: bool,
+    /// Bumped on every new read, so the drawing refreshes.
+    matches: u64,
+    pending_dm: Option<views::FoundDm>,
     tab_since: Option<Instant>,
 }
 
@@ -253,6 +260,23 @@ struct Reads {
 pub fn run(shared: Arc<Shared>) {
     if let Err(e) = run_inner(shared) {
         tray::log(&format!("overlay failed: {e}"));
+    }
+}
+
+impl Reads {
+    /// The VS screen is read straight away (it may still be fading in), then
+    /// once more 400 ms later when it has settled.
+    fn loading_due(&mut self) -> bool {
+        let (first, n) = self.loading_reads;
+        let due = match (first, n) {
+            (None, _) => true,
+            (Some(t), 1) => t.elapsed() >= Duration::from_millis(400),
+            _ => false,
+        };
+        if due {
+            self.loading_reads = (first.or(Some(Instant::now())), n + 1);
+        }
+        due
     }
 }
 
@@ -421,7 +445,7 @@ fn run_inner(shared: Arc<Shared>) -> Result<()> {
                 Some(_) if !enabled || snap.players.is_empty() => 1,
                 Some(scr) => match snap.phase {
                     // Agent select is over once the VS screen is up, even if Riot hasn't said so yet.
-                    Phase::Pregame if reads.loading_checked.is_none_or(|t| t.elapsed() > Duration::from_millis(300)) && {
+                    Phase::Pregame if reads.loading_checked.is_none_or(|t| t.elapsed() > Duration::from_millis(90)) && {
                         reads.loading_checked = Some(Instant::now());
                         reads.loading_up = views::loading_visible(&layout, scr);
                         reads.loading_up
@@ -429,7 +453,7 @@ fn run_inner(shared: Arc<Shared>) -> Result<()> {
                     Phase::Pregame if reads.loading_up => 1,
                     Phase::Pregame if cfg.show_agent_select => {
                         // Re-read the cards every 1.5 s: portraits appear as people hover.
-                        let stale = reads.agent_select.as_ref().is_none_or(|(_, t)| t.elapsed() > Duration::from_millis(1500));
+                        let stale = reads.agent_select.as_ref().is_none_or(|(_, t)| t.elapsed() > Duration::from_millis(600));
                         if stale {
                             let a = &layout.agent_select;
                             let seen = views::read_slots(&snap, &shared.content(), &[true], |_, i| {
@@ -448,17 +472,46 @@ fn run_inner(shared: Arc<Shared>) -> Result<()> {
                         views::agent_select(&snap, seen, &cfg, &layout, scr, &mut prims);
                         fp(&[4, latest, scr_fp(scr), seen.len() as u64, shared.config_gen()])
                     }
-                    Phase::Ingame if cfg.show_scoreboard && Keys::down(cfg.hold_key) => {
-                        // The scoreboard animates in. Read where it is every 100 ms
-                        // until two reads agree, then work out who's on each row once.
+                    Phase::Ingame if cfg.show_scoreboard && Keys::down(cfg.hold_key) && snap.is_deathmatch() => {
+                        // Same settle-then-read as below, for deathmatch's single list.
                         let since = *reads.tab_since.get_or_insert_with(Instant::now);
-                        let due = reads.last_scan.is_none_or(|t| t.elapsed() >= Duration::from_millis(100));
-                        if reads.board.is_none() && since.elapsed() >= Duration::from_millis(150) && due {
-                            reads.last_scan = Some(Instant::now());
+                        if !reads.fresh && since.elapsed() < Duration::from_millis(1500) {
+                            if let Some(found) = views::locate_deathmatch(&layout, scr, snap.players.len()) {
+                                let settled = reads.pending_dm.as_ref().is_some_and(|p| found.settled_with(p));
+                                if settled || since.elapsed() >= Duration::from_millis(1200) {
+                                    reads.fresh = true;
+                                    let seen = views::read_list(&snap, &shared.content(), |i| views::Probe {
+                                        portrait: views::dm_portrait(found.rows[i]),
+                                        is_self: found.self_row == Some(i),
+                                    });
+                                    reads.board_dm = Some((seen, found));
+                                    reads.pending_dm = None;
+                                    reads.matches += 1;
+                                } else {
+                                    reads.pending_dm = Some(found);
+                                }
+                            }
+                        }
+                        match &reads.board_dm {
+                            Some((b, found)) => {
+                                views::scoreboard_dm(&snap, b, &cfg, found, scr, &mut prims);
+                                fp(&[7, latest, scr_fp(scr), shared.config_gen(), reads.matches])
+                            }
+                            None => 1,
+                        }
+                    }
+                    Phase::Ingame if cfg.show_scoreboard && Keys::down(cfg.hold_key) => {
+                        // Instant: the last read of this match is drawn the moment Tab goes
+                        // down. Meanwhile the table is read every frame (30 ms); once two
+                        // reads agree it has stopped animating in, rows are matched again
+                        // and the drawing corrects itself if the order changed.
+                        let since = *reads.tab_since.get_or_insert_with(Instant::now);
+                        if !reads.fresh && since.elapsed() < Duration::from_millis(1500) {
                             let found = views::locate_scoreboard(&layout, scr);
                             let settled = reads.pending.as_ref().is_some_and(|p| found.settled_with(p));
                             // Give up waiting after 1.2 s (e.g. a frozen frame) and use the latest.
                             if settled || since.elapsed() >= Duration::from_millis(1200) {
+                                reads.fresh = true;
                                 let sb = found.layout.scoreboard.clone();
                                 let seen = views::read_slots(&snap, &shared.content(), &[true, false], |ally, i| views::Probe {
                                     portrait: scr.map(sb.row(ally, i).inner(sb.icon)),
@@ -466,6 +519,7 @@ fn run_inner(shared: Arc<Shared>) -> Result<()> {
                                 });
                                 reads.board = Some((seen, found));
                                 reads.pending = None;
+                                reads.matches += 1;
                             } else {
                                 reads.pending = Some(found);
                             }
@@ -473,24 +527,32 @@ fn run_inner(shared: Arc<Shared>) -> Result<()> {
                         match &reads.board {
                             Some((b, found)) => {
                                 views::scoreboard(&snap, b, &cfg, found, scr, &mut prims);
-                                fp(&[5, latest, scr_fp(scr), shared.config_gen()])
+                                fp(&[5, latest, scr_fp(scr), shared.config_gen(), reads.matches])
                             }
                             None => 1,
                         }
                     }
                     Phase::Ingame => {
+                        // Tab up: keep the last boards (drawn instantly next press).
                         reads.tab_since = None;
-                        reads.board = None;
+                        reads.fresh = false;
                         reads.pending = None;
-                        reads.last_scan = None;
+                        reads.pending_dm = None;
                         if !cfg.show_loading {
                             1
                         } else {
                             // Check for the VS screen a few times a second (five 1 px reads).
-                            if reads.loading_checked.is_none_or(|t| t.elapsed() > Duration::from_millis(300)) {
+                            if reads.loading_checked.is_none_or(|t| t.elapsed() > Duration::from_millis(90)) {
                                 reads.loading_checked = Some(Instant::now());
-                                reads.loading_up = views::loading_visible(&layout, scr);
-                                if reads.loading_up && reads.loading.is_none() {
+                                let dm = snap.is_deathmatch();
+                                reads.loading_up = if dm { views::loading_visible_dm(&layout, scr) } else { views::loading_visible(&layout, scr) };
+                                if dm && reads.loading_up && reads.loading_due() {
+                                    let l = &layout.loading;
+                                    reads.loading = Some(views::read_list(&snap, &shared.content(), |k| views::Probe {
+                                        portrait: scr.map(views::dm_slot(&layout, k).inner(l.dm_icon)),
+                                        is_self: false,
+                                    }));
+                                } else if !dm && reads.loading_up && reads.loading_due() {
                                     let l = &layout.loading;
                                     reads.loading = Some(views::read_slots(&snap, &shared.content(), &[true, false], |ally, i| {
                                         let card = scr.map(l.card(ally, i));
@@ -503,9 +565,13 @@ fn run_inner(shared: Arc<Shared>) -> Result<()> {
                                 }
                             }
                             match (&reads.loading, reads.loading_up) {
+                                (Some(seen), true) if snap.is_deathmatch() => {
+                                    views::loading_dm(&snap, seen, &cfg, &layout, scr, &mut prims);
+                                    fp(&[8, latest, scr_fp(scr), shared.config_gen(), reads.loading_reads.1 as u64])
+                                }
                                 (Some(seen), true) => {
                                     views::loading(&snap, seen, &cfg, &layout, scr, &mut prims);
-                                    fp(&[6, latest, scr_fp(scr), shared.config_gen()])
+                                    fp(&[6, latest, scr_fp(scr), shared.config_gen(), reads.loading_reads.1 as u64])
                                 }
                                 _ => 1,
                             }

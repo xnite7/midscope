@@ -210,6 +210,77 @@ pub fn find(img: &Img, guess: Guess) -> Option<Found> {
     Some(Found { left, ally_top, enemy_top, pitch, self_row, bg })
 }
 
+/// A free-for-all scoreboard (deathmatch): one list of `n` rows, red for
+/// everyone, teal for you.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FoundList {
+    pub left: f32,
+    pub top: f32,
+    pub pitch: f32,
+    pub self_row: Option<usize>,
+}
+
+pub fn find_list(img: &Img, guess: Guess, n: usize) -> Option<FoundList> {
+    let (w, h) = (img.w, img.h);
+    if w < 20 || h < 20 || n == 0 {
+        return None;
+    }
+    let cols: Vec<usize> = (0..24)
+        .map(|i| (guess.left + (guess.right - guess.left) * (0.05 + 0.9 * i as f32 / 23.0)) as usize)
+        .filter(|&x| x < w)
+        .collect();
+    // A line is "in the list" when most columns are red, teal or yellow.
+    let lines: Vec<Option<Band>> = (0..h)
+        .map(|y| {
+            let v: Vec<Band> = cols.iter().map(|&x| img.band(x, y)).collect();
+            let tinted = v.iter().filter(|b| **b != Band::None).count();
+            (tinted >= 12).then(|| {
+                let t = v.iter().filter(|b| **b == Band::Teal).count();
+                let r = v.iter().filter(|b| **b == Band::Red).count();
+                if t > r { Band::Teal } else { Band::Red }
+            })
+        })
+        .collect();
+    // Longest run of tinted lines; small gaps (row separators) allowed.
+    let (mut best, mut y) = ((0usize, 0usize), 0usize);
+    while y < h {
+        if lines[y].is_some() {
+            let start = y;
+            let mut last = y;
+            while y < h && (lines[y].is_some() || y - last <= 3) {
+                if lines[y].is_some() {
+                    last = y;
+                }
+                y += 1;
+            }
+            if last + 1 - start > best.1 {
+                best = (start, last + 1 - start);
+            }
+        } else {
+            y += 1;
+        }
+    }
+    let (top, len) = (best.0 as f32, best.1 as f32);
+    let pitch = len / n as f32;
+    if (pitch / guess.pitch - 1.0).abs() > 0.25 {
+        return None;
+    }
+    // Your row is the teal one.
+    let self_row = (0..n).find(|&k| {
+        let yc = (top + pitch * (k as f32 + 0.5)) as usize;
+        lines.get(yc).copied().flatten() == Some(Band::Teal)
+    });
+    // Left edge: the name column, where every row (bar one) is tinted.
+    // Scenery is often faintly reddish, so a looser rule latches onto it.
+    let centre = |k: usize| ((top + pitch * (k as f32 + 0.5)) as usize).min(h - 1);
+    let tinted = |x: usize| (0..n).filter(|&k| img.band(x, centre(k)) != Band::None).count() + 1 >= n;
+    let span = (3.0 * pitch) as usize;
+    let from = (guess.left as usize).saturating_sub(span);
+    let to = ((guess.left as usize) + span).min(w.saturating_sub(12));
+    let x = (from..to).find(|&x| (0..10).step_by(2).all(|d| tinted(x + d)))?;
+    Some(FoundList { left: x as f32 - NAME_COL * pitch, top, pitch, self_row })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,6 +302,16 @@ mod tests {
         ("sb_e.png", 374.0, 1138.0, 33.0, 391.0, 321.0, 543.0, 2),
         ("sb_f.png", 30.0, 810.0, 35.0, 44.0, 44.0, 275.0, 3),
     ];
+
+    #[test]
+    fn finds_deathmatch_list() {
+        let Some((px, w, h)) = load("dm_sb.png") else { return };
+        let f = find_list(&Img { px: &px, w, h }, Guess { left: 10.0, right: 790.0, pitch: 35.0 }, 12).expect("dm");
+        assert!((f.top - 42.0).abs() <= 3.0, "top {}", f.top);
+        assert!((f.pitch - 33.5).abs() <= 1.0, "pitch {}", f.pitch);
+        assert!((f.left - 26.0).abs() <= 4.0, "left {}", f.left);
+        assert_eq!(f.self_row, Some(11));
+    }
 
     #[test]
     fn finds_scoreboard_in_real_screenshots() {
