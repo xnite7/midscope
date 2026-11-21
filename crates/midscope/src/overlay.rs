@@ -417,6 +417,13 @@ fn run_inner(shared: Arc<Shared>) -> Result<()> {
                 }
                 Some(_) if !enabled || snap.players.is_empty() => 1,
                 Some(scr) => match snap.phase {
+                    // Agent select is over once the VS screen is up, even if Riot hasn't said so yet.
+                    Phase::Pregame if reads.loading_checked.is_none_or(|t| t.elapsed() > Duration::from_millis(300)) && {
+                        reads.loading_checked = Some(Instant::now());
+                        reads.loading_up = views::loading_visible(&layout, scr);
+                        reads.loading_up
+                    } => 1,
+                    Phase::Pregame if reads.loading_up => 1,
                     Phase::Pregame if cfg.show_agent_select => {
                         // Re-read the cards every 1.5 s: portraits appear as people hover.
                         let stale = reads.agent_select.as_ref().is_none_or(|(_, t)| t.elapsed() > Duration::from_millis(1500));

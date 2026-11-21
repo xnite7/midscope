@@ -174,6 +174,8 @@ fn poll_forever(shared: &Shared) {
         loop {
             let cfg = &shared.config();
             let phase = match game::phase(&riot) {
+                // The VS screen still reads as agent select; ask the match server.
+                Ok(Phase::Pregame) if game::in_core_game(&mut riot) => Phase::Ingame,
                 Ok(p) => p,
                 Err(Error::Net(_)) | Err(Error::NotRunning) => break, // client closed: reconnect
                 Err(e) => {

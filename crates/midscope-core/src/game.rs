@@ -103,6 +103,15 @@ pub fn phase(riot: &Riot) -> Result<Phase> {
 
 /// Builds a snapshot. Names and skins already known from `prev` (same match)
 /// are reused, so each player is looked up once per match, not every poll.
+/// Whether the match itself exists yet. Presence keeps saying "agent select"
+/// through the VS loading screen; the live-game server already knows better.
+pub fn in_core_game(riot: &mut Riot) -> bool {
+    let me = riot.session.puuid.clone();
+    riot.glz_get(&format!("/core-game/v1/players/{me}"))
+        .map(|v| v["MatchID"].as_str().is_some_and(|m| !m.is_empty()))
+        .unwrap_or(false)
+}
+
 pub fn snapshot(
     riot: &mut Riot,
     content: &Content,
