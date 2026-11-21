@@ -297,7 +297,7 @@ fn run_inner(shared: Arc<Shared>) -> Result<()> {
         let mut ui_painter = Painter::new(ui, size, base)?;
         let mut tray = tray::Tray::new(overlay, shared.just_updated);
         let mut shown_status = String::new();
-        let _ = SetTimer(overlay, 1, 30, None);
+        let _ = SetTimer(overlay, 1, 16, None);
 
         let mut layout = Layout::load();
         let mut keys = Keys { held: [None; 256] };

@@ -67,6 +67,25 @@ fn best_score(px: &[u8], pw: usize, ph: usize, w: usize, h: usize, tmpl: &iconma
 /// local-player slot is pinned to you; a single leftover is paired up.
 pub fn read_slots(snap: &Snapshot, content: &Content, teams: &[bool], probe: impl Fn(bool, usize) -> Probe) -> Seen {
     let mut seen = Seen::default();
+    // One screen grab covering every portrait (plus the search margin).
+    let all: Vec<Probe> = teams
+        .iter()
+        .flat_map(|&ally| {
+            let n = snap.players.iter().filter(|p| p.ally == ally).count();
+            (0..n).map(|i| probe(ally, i)).collect::<Vec<_>>()
+        })
+        .collect();
+    let frame = (!all.is_empty()).then(|| {
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for pr in &all {
+            let r = pr.portrait;
+            x0 = x0.min(r.x - r.w * 0.2);
+            y0 = y0.min(r.y - r.h * 0.2);
+            x1 = x1.max(r.x + r.w * 1.2);
+            y1 = y1.max(r.y + r.h * 1.2);
+        }
+        capture::Frame::grab(x0 as i32, y0 as i32, (x1 - x0) as i32 + 2, (y1 - y0) as i32 + 2)
+    }).flatten();
     for &ally in teams {
         let team: Vec<&Player> = snap.players.iter().filter(|p| p.ally == ally).collect();
         let mut scores: Vec<Vec<Option<f32>>> = Vec::new();
@@ -77,14 +96,14 @@ pub fn read_slots(snap: &Snapshot, content: &Content, teams: &[bool], probe: imp
             if is_self && ally {
                 self_slot = Some(i);
             }
-            let bg = pixel(r.x + r.w - 2.0, r.y + 2.0).unwrap_or([31, 39, 49]);
+            let bg = frame.as_ref().and_then(|f| f.rgb(r.x + r.w - 2.0, r.y + 2.0)).unwrap_or([31, 39, 49]);
             bgs.push(rgb_u32(bg));
             let bgf = [bg[0] as f32, bg[1] as f32, bg[2] as f32];
             // Capture with a ~12% margin so shifted portraits still line up.
             let (w, h) = (r.w.max(4.0) as usize, r.h.max(4.0) as usize);
             let (m_x, m_y) = ((r.w * 0.12) as usize, (r.h * 0.12) as usize);
             let (pw, ph) = (w + 2 * m_x, h + 2 * m_y);
-            let grabbed = capture::grab(r.x as i32 - m_x as i32, r.y as i32 - m_y as i32, pw as i32, ph as i32);
+            let grabbed = frame.as_ref().and_then(|f| f.crop(r.x as i32 - m_x as i32, r.y as i32 - m_y as i32, pw as i32, ph as i32));
             scores.push(
                 team.iter()
                     .map(|p| {
@@ -355,18 +374,30 @@ pub fn loading_visible(layout: &Layout, scr: Screen) -> bool {
     // VALORANT's enemy red is a pinkish red (about 255,70,85): low green, some blue.
     let red = |[r, g, b]: [u8; 3]| r > 190 && g < 110 && b > 50 && b < 140 && (b as i32) > g as i32 - 25;
     let teal = |[r, g, b]: [u8; 3]| g as i32 > r as i32 + 60 && b as i32 > r as i32 + 40;
-    let strip = |rect: Rect, want: &dyn Fn([u8; 3]) -> bool| {
-        capture::grab(rect.x as i32, (rect.y + rect.h / 2.0) as i32, rect.w.max(3.0) as i32, 1)
-            .is_some_and(|px| px.chunks(4).filter(|p| want([p[2], p[1], p[0]])).count() * 2 >= px.len() / 4)
+    // One tall grab per side covers all five strips.
+    let column = |rects: Vec<Rect>| {
+        let x = rects.iter().map(|r| r.x).fold(f32::MAX, f32::min);
+        let w = rects.iter().map(|r| r.x + r.w.max(3.0)).fold(f32::MIN, f32::max) - x;
+        let (y0, y1) = (rects[0].y, rects[rects.len() - 1].y + rects[rects.len() - 1].h);
+        capture::Frame::grab(x as i32, y0 as i32, w.ceil() as i32 + 1, (y1 - y0) as i32 + 2).map(|f| (f, rects))
     };
-    let enemy = (0..5).filter(|&i| strip(scr.map(l.card(false, i).inner(l.enemy_strip)), &red)).count();
+    let count = |side: Option<(capture::Frame, Vec<Rect>)>, want: &dyn Fn([u8; 3]) -> bool| -> usize {
+        let Some((f, rects)) = side else { return 0 };
+        rects
+            .iter()
+            .filter(|r| {
+                let y = r.y + r.h / 2.0;
+                let n = r.w.max(3.0) as usize;
+                (0..n).filter(|k| f.rgb(r.x + *k as f32, y).is_some_and(want)).count() * 2 >= n
+            })
+            .count()
+    };
+    let enemy = count(column((0..5).map(|i| scr.map(l.card(false, i).inner(l.enemy_strip))).collect()), &red);
     if enemy < 4 {
         return false;
     }
     let ally_strip = Rect { x: 1.0, y: 30.0, w: 4.0, h: 4.0 };
-    let ally = (0..5)
-        .filter(|&i| strip(scr.map(l.card(true, i).inner(ally_strip)), &|c| teal(c) || is_yellow(c)))
-        .count();
+    let ally = count(column((0..5).map(|i| scr.map(l.card(true, i).inner(ally_strip))).collect()), &|c| teal(c) || is_yellow(c));
     ally >= 4
 }
 
