@@ -181,6 +181,8 @@ pub struct Found {
     /// Where it was found on screen (left, ally top, enemy top, row height), to
     /// tell when the scoreboard has stopped animating in.
     pub at: Option<[f32; 4]>,
+    /// Pixels per layout unit for this table (its real size on screen).
+    pub ui: f32,
 }
 
 impl Found {
@@ -201,15 +203,18 @@ pub fn locate_scoreboard(layout: &Layout, scr: Screen) -> Found {
     let s = scr.scale;
     let est_ally = scr.map(sb.row(true, 0));
     let est_enemy = scr.map(sb.row(false, 0));
-    let pitch = sb.pitch * s;
-    let (x0, y0) = ((est_ally.x - 4.0 * pitch).max(0.0), (est_ally.y - 4.0 * pitch).max(0.0));
-    let w = est_ally.w + 8.0 * pitch;
-    let h = est_enemy.y + 9.0 * pitch - y0;
-    let mut found = Found { layout: layout.clone(), self_row: None, bg: [[CELL; 5]; 2], at: None };
-    let Some(px) = capture::grab(x0 as i32, y0 as i32, w as i32, h as i32) else { return found };
-    let img = scan::Img { px: &px, w: w as usize, h: h as usize };
-    let guess = scan::Guess { left: est_ally.x - x0, right: est_ally.x + est_ally.w - x0, pitch };
-    let Some(f) = scan::find(&img, guess) else {
+    let mut found = Found { layout: layout.clone(), self_row: None, bg: [[CELL; 5]; 2], at: None, ui: s };
+    // One grab of the game's whole UI area: the table is found wherever it is.
+    let (x0, y0) = (scr.bx.max(0.0), scr.by.max(0.0));
+    let Some(px) = capture::grab(x0 as i32, y0 as i32, scr.bw as i32, scr.bh as i32) else { return found };
+    let img = scan::Img { px: &px, w: scr.bw as usize, h: scr.bh as usize };
+    // Best: your row's yellow outline (size and place, no guessing).
+    // Fallback: the row colours near where the table usually is.
+    let f = scan::find_by_outline(&img).or_else(|| {
+        let pitch = sb.pitch * s;
+        scan::find(&img, scan::Guess { left: est_ally.x - x0, right: est_ally.x + est_ally.w - x0, pitch })
+    });
+    let Some(f) = f else {
         tray::log("scoreboard: not found, using saved positions");
         return found;
     };
@@ -230,13 +235,15 @@ pub fn locate_scoreboard(layout: &Layout, scr: Screen) -> Found {
     l.icon = Rect { x: 0.06 * p, y: 0.03 * p, w: 0.9 * p, h: 0.9 * p };
     l.name = Rect { x: 2.05 * p, y: 0.06 * p, w: 5.0 * p, h: 0.85 * p };
     found.self_row = f.self_row;
-    found.at = Some([f.left + x0, f.ally_top + y0, f.enemy_top + y0, f.pitch]);
+    // What we draw follows the table's real size, not the window's.
+    found.ui = f.pitch / 34.8;
     for t in 0..2 {
         for k in 0..5 {
             let (r, g, b) = f.bg[t][k];
             found.bg[t][k] = rgb_u32([r, g, b]);
         }
     }
+    found.at = Some([f.left + x0, f.ally_top + y0, f.enemy_top + y0, f.pitch]);
     tray::log(&format!(
         "scoreboard: left {} ally {} enemy {} row {:.1}px you {:?}",
         (f.left + x0) as i32,
@@ -618,8 +625,8 @@ const ENEMY_TINT: u32 = 0xC8475A;
 pub fn scoreboard(snap: &Snapshot, seen: &Seen, cfg: &Config, found: &Found, scr: Screen, out: &mut Vec<Prim>) {
     let layout = &found.layout;
     let sb = &layout.scoreboard;
-    let s = scr.scale;
-    let p = sb.pitch * s; // row height in pixels
+    let s = found.ui;
+    let p = sb.pitch * scr.scale; // row height in pixels
     let cols = |r: Rect| {
         let x = r.x + 10.0 * s;
         let w = r.w - 10.0 * s;

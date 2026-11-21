@@ -20,6 +20,7 @@ pub enum Setting {
     Skins,
     PartyLines,
     RevealNames,
+    InCaptures,
 }
 
 impl Setting {
@@ -31,6 +32,7 @@ impl Setting {
             Setting::Skins => &mut c.show_skins,
             Setting::PartyLines => &mut c.show_party_lines,
             Setting::RevealNames => &mut c.reveal_hidden_names,
+            Setting::InCaptures => &mut c.show_in_captures,
         }
     }
     fn get(self, c: &Config) -> bool {
@@ -96,7 +98,7 @@ impl Menu {
         self.hits.iter().rposition(|(r, _)| inside(*r, pt))
     }
 
-    pub fn draw(&mut self, cfg: &Config, layout: &Layout, scr: Screen, mouse: (f32, f32), status: &str, out: &mut Vec<Prim>) {
+    pub fn draw(&mut self, cfg: &Config, layout: &Layout, scr: Screen, mouse: (f32, f32), status: &str, updates: &str, out: &mut Vec<Prim>) {
         self.hits.clear();
         let s = scr.scale;
         let u = |x: f32, y: f32, w: f32, h: f32| scr.top_left(Rect { x, y, w, h });
@@ -163,17 +165,25 @@ impl Menu {
                 ("party lines", "a line between people who queued together, with duo or trio on it.", Some(Setting::PartyLines), false),
                 ("weapon skins", "vandal and phantom skins.", Some(Setting::Skins), false),
             ],
-            1 => vec![(
-                "show hidden names",
-                "names of people in streamer mode. riot has banned accounts for tools that do this. your call.",
-                Some(Setting::RevealNames),
-                true,
-            )],
+            1 => vec![
+                (
+                    "show hidden names",
+                    "names of people in streamer mode. riot has banned accounts for tools that do this. your call.",
+                    Some(Setting::RevealNames),
+                    true,
+                ),
+                (
+                    "show in screenshots and streams",
+                    "off keeps midscope out of every capture. turn on to screenshot it; detection can wobble while it's on.",
+                    Some(Setting::InCaptures),
+                    false,
+                ),
+            ],
             2 => vec![("positions", "if something sits off the game's ui after a patch, line it up again.", None, false)],
             _ => vec![
                 ("midscope", "reads the riot client's own api. no injection, no game memory. just looking.", None, false),
                 ("hotkeys", "f6 show or hide  ·  f7 calibrate  ·  ctrl shift f6 quit", None, false),
-                ("updates", "midscope updates itself, quietly, between matches. nothing to click.", None, false),
+                ("updates", updates, None, false),
             ],
         };
 

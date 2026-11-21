@@ -21,7 +21,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetCursorPos, GetForegroundWindow,
     GetMessageW, GetSystemMetrics, GetWindowTextW, PostQuitMessage, RegisterClassW, SetTimer, ShowWindow,
     TranslateMessage, HMENU, MSG, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE,
-    WM_DESTROY, WM_MOUSEACTIVATE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WM_DESTROY, WM_MOUSEACTIVATE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_EX_TRANSPARENT, WS_POPUP,
 };
 
@@ -296,6 +296,7 @@ fn run_inner(shared: Arc<Shared>) -> Result<()> {
         let mut overlay_painter = Painter::new(overlay, size, base)?;
         let mut ui_painter = Painter::new(ui, size, base)?;
         let mut tray = tray::Tray::new(overlay, shared.just_updated);
+        let mut hidden_from_capture: Option<bool> = None;
         let mut shown_status = String::new();
         let _ = SetTimer(overlay, 1, 16, None);
 
@@ -350,6 +351,15 @@ fn run_inner(shared: Arc<Shared>) -> Result<()> {
                 reads = Reads { key, ..Default::default() };
             }
             let cfg = shared.config();
+            // Keep our own drawing out of screen captures (midscope's reads, and
+            // screenshots / streams) unless the user wants it in them.
+            let hide = !cfg.show_in_captures;
+            if hidden_from_capture != Some(hide) {
+                let mode = if hide { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+                let _ = SetWindowDisplayAffinity(overlay, mode);
+                let _ = SetWindowDisplayAffinity(ui, mode);
+                hidden_from_capture = Some(hide);
+            }
             let scr = game_screen();
             let m = mouse();
 
@@ -380,7 +390,8 @@ fn run_inner(shared: Arc<Shared>) -> Result<()> {
                 if menu.open && keys.pressed(VK_ESCAPE.0) {
                     menu.open = false;
                 }
-                menu.draw(&cfg, &layout, scr, m, &status, &mut ui_prims);
+                let updates = format!("midscope updates itself between matches. {}", shared.update_status.lock().unwrap());
+                menu.draw(&cfg, &layout, scr, m, &status, &updates, &mut ui_prims);
                 ui_next = fp(&[
                     2,
                     scr_fp(scr),
@@ -389,6 +400,7 @@ fn run_inner(shared: Arc<Shared>) -> Result<()> {
                     menu.hover_key(m).map_or(u64::MAX, |h| h as u64),
                     shared.config_gen(),
                     status.len() as u64,
+                    shared.update_status.lock().unwrap().len() as u64,
                     layout.menu.tab.rect.x.to_bits() as u64,
                 ]);
                 present(ui, &mut ui_painter, &ui_prims, scr.scale, ui_next, &mut ui_shown);
@@ -580,7 +592,10 @@ fn run_inner(shared: Arc<Shared>) -> Result<()> {
                     _ => 1,
                 },
             };
+            let tab_up = Keys::down(cfg.hold_key) && snap.phase == Phase::Ingame && !snap.is_deathmatch();
             let fscale = match (scr, reads.loading_up && snap.phase == Phase::Ingame) {
+                // Scoreboard text follows the table's real size.
+                (Some(_), false) if tab_up && reads.board.is_some() => reads.board.as_ref().map_or(1.0, |b| b.1.ui),
                 (Some(s), true) => s.lscale,
                 (Some(s), false) => s.scale,
                 _ => 1.0,

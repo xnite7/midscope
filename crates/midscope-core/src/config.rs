@@ -20,6 +20,9 @@ pub struct Config {
     pub show_scoreboard: bool,
     pub show_skins: bool,
     pub show_party_lines: bool,
+    /// Show midscope in screenshots and streams. Off: it's hidden from every
+    /// capture, which also keeps its own screen reads clean.
+    pub show_in_captures: bool,
 }
 
 impl Default for Config {
@@ -34,6 +37,7 @@ impl Default for Config {
             show_scoreboard: true,
             show_skins: true,
             show_party_lines: true,
+            show_in_captures: false,
         }
     }
 }

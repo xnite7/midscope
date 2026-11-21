@@ -210,6 +210,100 @@ pub fn find(img: &Img, guess: Guess) -> Option<Found> {
     Some(Found { left, ally_top, enemy_top, pitch, self_row, bg })
 }
 
+/// Finds the scoreboard from the yellow outline round your own row: it spans
+/// the table's full width (so its right end is the table's right edge) and
+/// its two lines are one row apart (so it gives the row height at any
+/// resolution). Rows above yours that are still teal put the table's top.
+/// Needs no guess about where the table is or how big.
+pub fn find_by_outline(img: &Img) -> Option<Found> {
+    let (w, h) = (img.w, img.h);
+    let yellow = |x: usize, y: usize| {
+        let (r, g, b) = img.rgb(x, y);
+        r > 170 && g > 150 && (b as i32) < g as i32 - 40
+    };
+    // Every line with a long yellow run: (y, run end).
+    let mut lines: Vec<(usize, usize, usize)> = Vec::new();
+    for y in 0..h {
+        let (mut best, mut start, mut last, mut on) = ((0usize, 0usize), 0usize, 0usize, false);
+        for x in 0..w {
+            if yellow(x, y) {
+                if !on || x - last > 3 {
+                    start = x;
+                }
+                on = true;
+                last = x;
+                if last - start > best.1.saturating_sub(best.0) {
+                    best = (start, last);
+                }
+            }
+        }
+        if best.1 - best.0 >= 250 {
+            lines.push((y, best.0, best.1));
+        }
+    }
+    // The outline: two such lines 20..80 px apart ending at the same x.
+    let mut pick = None;
+    'outer: for (i, a) in lines.iter().enumerate() {
+        for b in &lines[i + 1..] {
+            let d = b.0 - a.0;
+            if (20..=80).contains(&d) && (a.2 as i32 - b.2 as i32).abs() <= 3 {
+                pick = Some((a.0, b.0, a.2.max(b.2)));
+                break 'outer;
+            }
+        }
+    }
+    let (y1, y2, right_px) = pick?;
+    let start_px = lines.iter().filter(|l| l.0 == y1 || l.0 == y2).map(|l| l.1).min().unwrap_or(0);
+    let right = right_px as f32 + 1.0;
+    let mut pitch = (y2 - y1) as f32 + 1.0;
+    // When the outline is unbroken its left end is the table's left edge and
+    // gives the exact row height too; if something covers part of it, fall
+    // back to the table's fixed width.
+    let mut left = right - TABLE_W * pitch;
+    if (start_px as f32 - left).abs() < 0.5 * pitch {
+        left = start_px as f32;
+        pitch = (right - left) / TABLE_W;
+    }
+    if left < -pitch {
+        return None;
+    }
+    // Teal rows above yours (dead ones stay tinted) up to the header bar.
+    // Sampled in the KDA..ping columns, clear of anything drawn on the table.
+    let teal_row = |row_top: f32| {
+        let y = (row_top + pitch * 0.5) as usize;
+        if y >= h {
+            return false;
+        }
+        // 24 points across the row; text and gun icons are white, so a quarter
+        // teal (and more teal than red) is a row; the header bar has none.
+        let xs: Vec<usize> = (0..24).map(|k| (left + pitch * (2.2 + 0.85 * k as f32)) as usize).filter(|&x| x < w).collect();
+        let t = xs.iter().filter(|&&x| img.band(x, y) == Band::Teal).count();
+        let r = xs.iter().filter(|&&x| img.band(x, y) == Band::Red).count();
+        t * 4 >= xs.len() && t > r
+    };
+    let mut k = 0;
+    while k < 4 && y1 as f32 - (k + 1) as f32 * pitch >= 0.0 && teal_row(y1 as f32 - (k + 1) as f32 * pitch) {
+        k += 1;
+    }
+    let ally_top = y1 as f32 - k as f32 * pitch;
+    let enemy_top = ally_top + BLOCK_GAP * pitch;
+
+    let centre = |top: f32, r: usize| ((top + pitch * (r as f32 + 0.5)) as usize).min(h - 1);
+    let mut bg = [[(0u8, 0u8, 0u8); 5]; 2];
+    for (t, top) in [ally_top, enemy_top].into_iter().enumerate() {
+        for (r, slot) in bg[t].iter_mut().enumerate() {
+            let y = centre(top, r);
+            let mut v: Vec<(u8, u8, u8)> = (0..12)
+                .map(|q| ((left + pitch * (9.5 + q as f32)) as usize).min(w - 1))
+                .map(|x| img.rgb(x, y))
+                .collect();
+            v.sort_by_key(|c| c.0 as u32 + c.1 as u32 + c.2 as u32);
+            *slot = v[v.len() / 2];
+        }
+    }
+    Some(Found { left, ally_top, enemy_top, pitch, self_row: Some(k), bg })
+}
+
 /// A free-for-all scoreboard (deathmatch): one list of `n` rows, red for
 /// everyone, teal for you.
 #[derive(Clone, Debug, PartialEq)]
@@ -302,6 +396,32 @@ mod tests {
         ("sb_e.png", 374.0, 1138.0, 33.0, 391.0, 321.0, 543.0, 2),
         ("sb_f.png", 30.0, 810.0, 35.0, 44.0, 44.0, 275.0, 3),
     ];
+
+    /// The outline method needs no guess at all: whole screenshots in, table out.
+    /// (g and h have midscope's own drawing over the table, as captured then.)
+    #[test]
+    fn finds_scoreboard_from_your_outline() {
+        let cases: &[(&str, f32, f32, f32, usize)] = &[
+            ("sb_a.png", 104.0, 84.0, 313.0, 4),
+            ("sb_b.png", 109.0, 73.0, 303.0, 4),
+            ("sb_c.png", 104.0, 71.0, 301.0, 4),
+            ("sb_d.png", 38.0, 49.0, 279.0, 2),
+            ("sb_e.png", 391.0, 321.0, 543.0, 2),
+            ("sb_f.png", 44.0, 44.0, 275.0, 3),
+            ("sb_g.png", 169.0, 160.0, 390.0, 1),
+        ];
+        let mut ran = 0;
+        for &(file, left, ally, enemy, me) in cases {
+            let Some((px, w, h)) = load(file) else { continue };
+            ran += 1;
+            let f = find_by_outline(&Img { px: &px, w, h }).expect(file);
+            assert!((f.left - left).abs() <= 4.0, "{file}: left {} want {left}", f.left);
+            assert!((f.ally_top - ally).abs() <= 3.0, "{file}: ally {} want {ally}", f.ally_top);
+            assert!((f.enemy_top - enemy).abs() <= 5.0, "{file}: enemy {} want {enemy}", f.enemy_top);
+            assert_eq!(f.self_row, Some(me), "{file}: your row");
+        }
+        eprintln!("outline: checked {ran}");
+    }
 
     #[test]
     fn finds_deathmatch_list() {

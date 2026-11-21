@@ -40,6 +40,8 @@ pub struct Shared {
     /// Set by the updater once a new build is in place: close and relaunch.
     pub restart: AtomicBool,
     pub updated_to: Mutex<Option<String>>,
+    /// What the updater is doing, for the settings page.
+    pub update_status: Mutex<String>,
     /// This run started right after an update.
     pub just_updated: bool,
 }
@@ -114,6 +116,7 @@ fn main() {
         config_gen: AtomicU64::new(0),
         restart: AtomicBool::new(false),
         updated_to: Mutex::new(None),
+        update_status: Mutex::new("checking for updates.".into()),
         just_updated,
     });
     update::spawn(shared.clone());

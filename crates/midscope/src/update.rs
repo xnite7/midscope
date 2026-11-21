@@ -19,7 +19,7 @@ use midscope_core::update::{self, Manifest};
 use crate::Shared;
 
 /// How often to look for a new build.
-const EVERY: Duration = Duration::from_secs(150);
+const EVERY: Duration = Duration::from_secs(45);
 
 fn log(s: &str) {
     #[cfg(windows)]
@@ -99,9 +99,16 @@ pub fn clean_up() {
 pub fn spawn(shared: Arc<Shared>) {
     let _ = std::thread::Builder::new().name("updater".into()).stack_size(512 * 1024).spawn(move || {
         let mut ready: Option<(PathBuf, String)> = None;
+        let set = |s: String| *shared.update_status.lock().unwrap() = s;
         loop {
             if ready.is_none() {
                 ready = fetch_newer();
+                if ready.is_none() {
+                    set(format!("up to date. v{}.", update::current_version()));
+                }
+            }
+            if let Some((_, v)) = &ready {
+                set(format!("v{v} is ready. it goes in between matches."));
             }
             if let Some((path, version)) = &ready {
                 // Never restart mid agent select or mid match.
@@ -116,6 +123,7 @@ pub fn spawn(shared: Arc<Shared>) {
                         }
                         Err(e) => {
                             log(&format!("update: couldn't replace the exe ({e}); will retry"));
+                            set(format!("couldn't swap in the update: {e}"));
                         }
                     }
                 }
