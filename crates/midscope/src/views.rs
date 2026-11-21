@@ -346,19 +346,28 @@ pub fn loading_dm(snap: &Snapshot, seen: &Seen, cfg: &Config, layout: &Layout, s
     }
 }
 
-/// The VS loading screen is up when the enemy cards' red edge strips are.
+/// The VS loading screen is up when the enemy cards' red edge strips AND the
+/// ally cards' teal (yours yellow) edge strips are all where they should be.
+/// Checking both sides at once is what stops orange walls or red skies in the
+/// round from passing for the VS screen.
 pub fn loading_visible(layout: &Layout, scr: Screen) -> bool {
     let l = &layout.loading;
-    (0..5)
-        .filter(|&i| {
-            // A thin strip: read a few pixels across it and take any red one.
-            let r = scr.map(l.card(false, i).inner(l.enemy_strip));
-            let red = |[r, g, b]: [u8; 3]| r > 150 && r as i32 - g as i32 > 70 && r as i32 - b as i32 > 50;
-            capture::grab(r.x as i32, (r.y + r.h / 2.0) as i32, r.w.max(3.0) as i32, 1)
-                .is_some_and(|px| px.chunks(4).any(|p| red([p[2], p[1], p[0]])))
-        })
-        .count()
-        >= 3
+    // VALORANT's enemy red is a pinkish red (about 255,70,85): low green, some blue.
+    let red = |[r, g, b]: [u8; 3]| r > 190 && g < 110 && b > 50 && b < 140 && (b as i32) > g as i32 - 25;
+    let teal = |[r, g, b]: [u8; 3]| g as i32 > r as i32 + 60 && b as i32 > r as i32 + 40;
+    let strip = |rect: Rect, want: &dyn Fn([u8; 3]) -> bool| {
+        capture::grab(rect.x as i32, (rect.y + rect.h / 2.0) as i32, rect.w.max(3.0) as i32, 1)
+            .is_some_and(|px| px.chunks(4).filter(|p| want([p[2], p[1], p[0]])).count() * 2 >= px.len() / 4)
+    };
+    let enemy = (0..5).filter(|&i| strip(scr.map(l.card(false, i).inner(l.enemy_strip)), &red)).count();
+    if enemy < 4 {
+        return false;
+    }
+    let ally_strip = Rect { x: 1.0, y: 30.0, w: 4.0, h: 4.0 };
+    let ally = (0..5)
+        .filter(|&i| strip(scr.map(l.card(true, i).inner(ally_strip)), &|c| teal(c) || is_yellow(c)))
+        .count();
+    ally >= 4
 }
 
 // ───────────────────────────── pieces ─────────────────────────────
