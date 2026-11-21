@@ -1,0 +1,3 @@
+/target
+# screenshots used by the scoreboard test: kept out of the repo (other players' names)
+/crates/midscope-core/tests/fixtures/

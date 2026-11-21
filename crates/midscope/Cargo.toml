@@ -1,0 +1,32 @@
+[package]
+name = "midscope"
+version.workspace = true
+edition.workspace = true
+
+build = "build.rs"
+
+[build-dependencies]
+embed-resource = "3"
+
+[dependencies]
+midscope-core = { path = "../midscope-core" }
+ureq = { version = "2.10", default-features = false, features = ["json", "tls"] }
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = [
+  "Foundation_Numerics",
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Graphics_Direct2D",
+  "Win32_Graphics_Direct2D_Common",
+  "Win32_Graphics_DirectWrite",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Threading",
+  "Win32_Security",
+  "Win32_UI_Shell",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+]

@@ -1,0 +1,20 @@
+1 ICON "../../assets/midscope.ico"
+1 VERSIONINFO
+FILEVERSION 0,5,0,0
+PRODUCTVERSION 0,5,0,0
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904b0"
+    BEGIN
+      VALUE "FileDescription", "midscope"
+      VALUE "ProductName", "midscope"
+      VALUE "ProductVersion", "0.5.0"
+      VALUE "OriginalFilename", "midscope.exe"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

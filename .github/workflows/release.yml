@@ -1,0 +1,55 @@
+name: Release midscope
+
+# Every push to main is a new version: build it, sign it, publish it.
+# Everyone's midscope picks it up within a few minutes, between matches.
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md"]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  MIDSCOPE_VERSION: 0.6.${{ github.run_number }}
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test -p midscope-core --release
+
+      - name: Build
+        run: cargo build --release -p midscope -p midscope-sign
+
+      - name: Sign
+        shell: bash
+        env:
+          MIDSCOPE_SIGNING_KEY: ${{ secrets.MIDSCOPE_SIGNING_KEY }}
+          NOTES: ${{ github.event.head_commit.message }}
+        run: |
+          if [ -z "$MIDSCOPE_SIGNING_KEY" ]; then echo "::error::add the MIDSCOPE_SIGNING_KEY secret"; exit 1; fi
+          mkdir dist
+          cp target/release/midscope.exe dist/midscope.exe
+          url="https://github.com/${{ github.repository }}/releases/download/v$MIDSCOPE_VERSION/midscope.exe"
+          target/release/midscope-sign manifest dist/midscope.exe "$MIDSCOPE_VERSION" "$url" "$(echo "$NOTES" | head -n1)" > dist/latest.json
+          cat dist/latest.json
+
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NOTES: ${{ github.event.head_commit.message }}
+        run: |
+          gh release create "v$MIDSCOPE_VERSION" dist/midscope.exe dist/latest.json \
+            --repo "${{ github.repository }}" --title "midscope $MIDSCOPE_VERSION" \
+            --notes "${NOTES:-new build}" --latest

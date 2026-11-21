@@ -1,0 +1,10 @@
+[package]
+name = "midscope-sign"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+midscope-core = { path = "../midscope-core" }
+ed25519-compact = { version = "2.1", features = ["random"] }
+serde_json = "1"

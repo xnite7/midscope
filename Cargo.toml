@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/midscope-core", "crates/midscope", "crates/midscope-sign"]
+
+[workspace.package]
+version = "0.6.0"
+edition = "2021"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
