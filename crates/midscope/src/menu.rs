@@ -21,6 +21,7 @@ pub enum Setting {
     PartyLines,
     RevealNames,
     InCaptures,
+    Rgb,
 }
 
 impl Setting {
@@ -33,6 +34,7 @@ impl Setting {
             Setting::PartyLines => &mut c.show_party_lines,
             Setting::RevealNames => &mut c.reveal_hidden_names,
             Setting::InCaptures => &mut c.show_in_captures,
+            Setting::Rgb => &mut c.rgb,
         }
     }
     fn get(self, c: &Config) -> bool {
@@ -163,7 +165,8 @@ impl Menu {
                 ("the vs screen", "rank, peak and tags next to everyone while the match loads.", Some(Setting::Loading), false),
                 ("scoreboard", "hold tab. rank, skins and tags join the end of the table.", Some(Setting::Scoreboard), false),
                 ("party lines", "a line between people who queued together, with duo or trio on it.", Some(Setting::PartyLines), false),
-                ("weapon skins", "vandal and phantom skins.", Some(Setting::Skins), false),
+                ("weapon skins", "vandal and phantom skins, painted on the guns in the scoreboard.", Some(Setting::Skins), false),
+                ("rgb", "steelseries, razer and logitech gear glows your agent's colour.", Some(Setting::Rgb), false),
             ],
             1 => vec![
                 (

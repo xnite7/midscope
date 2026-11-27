@@ -27,6 +27,8 @@ mod paint;
 mod views;
 #[cfg(windows)]
 mod tray;
+#[cfg(windows)]
+mod rgb;
 mod update;
 
 /// The latest snapshot plus a counter the overlay watches for changes.
@@ -120,6 +122,8 @@ fn main() {
         just_updated,
     });
     update::spawn(shared.clone());
+    #[cfg(windows)]
+    rgb::spawn(shared.clone());
 
     let worker = shared.clone();
     std::thread::Builder::new()

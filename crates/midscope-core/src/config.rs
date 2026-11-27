@@ -23,6 +23,8 @@ pub struct Config {
     /// Show midscope in screenshots and streams. Off: it's hidden from every
     /// capture, which also keeps its own screen reads clean.
     pub show_in_captures: bool,
+    /// Light up SteelSeries / Razer / Logitech gear with the game.
+    pub rgb: bool,
 }
 
 impl Default for Config {
@@ -38,6 +40,7 @@ impl Default for Config {
             show_skins: true,
             show_party_lines: true,
             show_in_captures: false,
+            rgb: true,
         }
     }
 }
