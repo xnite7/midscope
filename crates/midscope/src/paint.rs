@@ -11,7 +11,7 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Bitmap, ID2D1DCRenderTarget, ID2D1Factory, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+    D2D1CreateFactory, ID2D1Bitmap, ID2D1DCRenderTarget, ID2D1Factory, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
     D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2, D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES,
     D2D1_ROUNDED_RECT,
     D2D1_BITMAP_PROPERTIES, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_FACTORY_TYPE_SINGLE_THREADED,
@@ -131,6 +131,15 @@ pub enum Prim {
     /// A soft pool of light: centre, radius, colour, strength.
     Glow(f32, f32, f32, u32, f32),
     Image(Img, Rect),
+    /// Raw pixels made at run time (premultiplied BGRA), drawn 1:1.
+    Pixels(std::sync::Arc<Patch>, Rect),
+}
+
+/// A small run-time bitmap.
+pub struct Patch {
+    pub w: usize,
+    pub h: usize,
+    pub bgra: Vec<u8>,
 }
 
 /// Back-compat for the views: a rank icon.
@@ -298,7 +307,15 @@ impl Painter {
         bitmap
     }
 
-    pub fn paint(&self, prims: &[Prim]) -> Result<()> {
+    /// Changes only how see-through the whole window is (fades); nothing is redrawn.
+    pub fn fade(&self, alpha: u8) {
+        let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: alpha, AlphaFormat: AC_SRC_ALPHA as u8 };
+        unsafe {
+            let _ = UpdateLayeredWindow(self.hwnd, None, None, None, None, None, COLORREF(0), Some(&blend), ULW_ALPHA);
+        }
+    }
+
+    pub fn paint(&self, prims: &[Prim], alpha: u8) -> Result<()> {
         let (w, h) = self.size;
         unsafe {
             let screen_dc = GetDC(None);
@@ -352,6 +369,17 @@ impl Painter {
                                 t.DrawBitmap(&b, Some(&d2r(*r)), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
                             }
                         }
+                        Prim::Pixels(patch, r) => {
+                            let props = D2D1_BITMAP_PROPERTIES {
+                                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                                dpiX: 96.0,
+                                dpiY: 96.0,
+                            };
+                            let size = D2D_SIZE_U { width: patch.w as u32, height: patch.h as u32 };
+                            if let Ok(b) = t.CreateBitmap(size, Some(patch.bgra.as_ptr() as _), (patch.w * 4) as u32, &props) {
+                                t.DrawBitmap(&b, Some(&d2r(*r)), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, None);
+                            }
+                        }
                         Prim::Round(r, rad, rgb, a) => t.FillRoundedRectangle(
                             &D2D1_ROUNDED_RECT { rect: d2r(*r), radiusX: *rad, radiusY: *rad },
                             &t.CreateSolidColorBrush(&color(*rgb, *a), None)?,
@@ -390,7 +418,7 @@ impl Painter {
                 t.EndDraw(None, None)
             })();
 
-            let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
+            let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: alpha, AlphaFormat: AC_SRC_ALPHA as u8 };
             let shown = UpdateLayeredWindow(
                 self.hwnd,
                 screen_dc,

@@ -25,6 +25,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TRANSPARENT, WS_POPUP,
 };
 
+use midscope_core::config::Config;
 use midscope_core::game::{Phase, Snapshot};
 use midscope_core::layout::{Anchor, Layout, Rect, Screen};
 
@@ -204,24 +205,43 @@ unsafe fn make_window(ex: WINDOW_EX_STYLE, size: (i32, i32)) -> Result<HWND> {
 }
 
 /// Shows `prims` on a window if `next` differs from what it shows now.
-fn present(hwnd: HWND, painter: &mut Painter, prims: &[Prim], scale: f32, next: u64, shown: &mut u64) {
-    if next == *shown {
-        return;
-    }
+/// What a window is showing, and since when (for its fade-in).
+#[derive(Default)]
+struct Shown {
+    fp: u64,
+    since: Option<Instant>,
+    alpha: u8,
+}
+
+/// Draws when the content changed. Things fade in over a few frames like the
+/// game's own UI does, and go away at once.
+fn present(hwnd: HWND, painter: &mut Painter, prims: &[Prim], scale: f32, next: u64, shown: &mut Shown) {
     unsafe {
         if prims.is_empty() {
-            let _ = ShowWindow(hwnd, SW_HIDE);
-        } else {
+            if shown.fp != next || shown.since.is_some() {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            }
+            *shown = Shown { fp: next, since: None, alpha: 0 };
+            return;
+        }
+        let since = *shown.since.get_or_insert_with(Instant::now);
+        let t = (since.elapsed().as_secs_f32() / 0.10).min(1.0);
+        let alpha = ((0.3 + 0.7 * (1.0 - (1.0 - t) * (1.0 - t))) * 255.0) as u8;
+        if shown.fp != next {
             painter.set_scale(scale);
-            match painter.paint(prims) {
+            match painter.paint(prims, alpha) {
                 Ok(()) => {
                     let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                 }
                 Err(e) => tray::log(&format!("paint failed: {e}")),
             }
+            shown.fp = next;
+            shown.alpha = alpha;
+        } else if alpha != shown.alpha {
+            painter.fade(alpha);
+            shown.alpha = alpha;
         }
     }
-    *shown = next;
 }
 
 /// A cheap fingerprint of whatever a view depends on.
@@ -253,6 +273,12 @@ struct Reads {
     matches: u64,
     pending_dm: Option<views::FoundDm>,
     tab_since: Option<Instant>,
+    /// The scoreboard is really on screen this press (not the shop, etc.).
+    live: bool,
+    misses: u8,
+    next_scan: Option<Instant>,
+    /// When this phase began: the VS screen is only looked for early on.
+    born: Option<Instant>,
 }
 
 // ───────────────────────────── main loop ─────────────────────────────
@@ -278,6 +304,54 @@ impl Reads {
         }
         due
     }
+}
+
+/// The VS / loading screen. None when it isn't up; otherwise what was drawn.
+/// It's looked for a few times a second, and only in the first two minutes
+/// of a phase, so nothing is captured mid-match.
+#[allow(clippy::too_many_arguments)]
+fn loading_view(reads: &mut Reads, snap: &Snapshot, cfg: &Config, layout: &Layout, scr: Screen, shared: &Shared, latest: u64, prims: &mut Vec<Prim>) -> Option<u64> {
+    let born = *reads.born.get_or_insert_with(Instant::now);
+    let dm = snap.is_deathmatch();
+    let looking = reads.loading_up || born.elapsed() < Duration::from_secs(120);
+    if looking && reads.loading_checked.is_none_or(|t| t.elapsed() > Duration::from_millis(90)) {
+        reads.loading_checked = Some(Instant::now());
+        let up = if dm { views::loading_visible_dm(layout, scr) } else { views::loading_visible(layout, scr) };
+        if up != reads.loading_up {
+            tray::log(if up { "vs screen: up" } else { "vs screen: gone" });
+        }
+        reads.loading_up = up;
+        if up && cfg.show_loading && reads.loading_due() {
+            let l = &layout.loading;
+            let content = shared.content();
+            reads.loading = Some(if dm {
+                views::read_list(snap, &content, |k| views::Probe { portrait: scr.map(views::dm_slot(layout, k).inner(l.dm_icon)), is_self: false })
+            } else {
+                views::read_slots(snap, &content, &[true, false], |ally, i| {
+                    let card = scr.map(l.card(ally, i));
+                    views::Probe {
+                        portrait: scr.map(l.card(ally, i).inner(if ally { l.ally_icon } else { l.enemy_icon })),
+                        // Your card's edge strip is yellow.
+                        is_self: ally && views::yellow_share(Rect { x: card.x + 1.0, y: card.y + card.h * 0.3, w: 3.0, h: card.h * 0.4 }) > 0.5,
+                    }
+                })
+            });
+        }
+    }
+    if !reads.loading_up {
+        return None;
+    }
+    Some(match &reads.loading {
+        Some(seen) if cfg.show_loading && dm => {
+            views::loading_dm(snap, seen, cfg, layout, scr, prims);
+            fp(&[8, latest, scr_fp(scr), shared.config_gen(), reads.loading_reads.1 as u64])
+        }
+        Some(seen) if cfg.show_loading => {
+            views::loading(snap, seen, cfg, layout, scr, prims);
+            fp(&[6, latest, scr_fp(scr), shared.config_gen(), reads.loading_reads.1 as u64])
+        }
+        _ => 1,
+    })
 }
 
 fn run_inner(shared: Arc<Shared>) -> Result<()> {
@@ -307,8 +381,8 @@ fn run_inner(shared: Arc<Shared>) -> Result<()> {
         let mut sel = 0usize;
         let mut snap = Snapshot::empty(Phase::Offline);
         let mut latest = u64::MAX;
-        let mut overlay_shown = 0u64;
-        let mut ui_shown = 0u64;
+        let mut overlay_shown = Shown::default();
+        let mut ui_shown = Shown::default();
         let mut reads = Reads::default();
         let mut menu = Menu::default();
         let mut msg = MSG::default();
@@ -419,6 +493,8 @@ fn run_inner(shared: Arc<Shared>) -> Result<()> {
 
             // ── game info overlay ──
             let mut prims = Vec::new();
+            #[allow(unused_assignments)]
+            let mut vs: Option<u64> = None;
             let next = match scr {
                 None => 1,
                 Some(scr) if calibrating => {
@@ -456,13 +532,12 @@ fn run_inner(shared: Arc<Shared>) -> Result<()> {
                 }
                 Some(_) if !enabled || snap.players.is_empty() => 1,
                 Some(scr) => match snap.phase {
-                    // Agent select is over once the VS screen is up, even if Riot hasn't said so yet.
-                    Phase::Pregame if reads.loading_checked.is_none_or(|t| t.elapsed() > Duration::from_millis(90)) && {
-                        reads.loading_checked = Some(Instant::now());
-                        reads.loading_up = views::loading_visible(&layout, scr);
-                        reads.loading_up
-                    } => 1,
-                    Phase::Pregame if reads.loading_up => 1,
+                    // The VS screen can come up while Riot still says agent select:
+                    // show it (with who we know so far) instead of the cards.
+                    Phase::Pregame if {
+                        vs = loading_view(&mut reads, &snap, &cfg, &layout, scr, &shared, latest, &mut prims);
+                        vs.is_some()
+                    } => vs.unwrap_or(1),
                     Phase::Pregame if cfg.show_agent_select => {
                         // Re-read the cards every 1.5 s: portraits appear as people hover.
                         let stale = reads.agent_select.as_ref().is_none_or(|(_, t)| t.elapsed() > Duration::from_millis(600));
@@ -484,116 +559,116 @@ fn run_inner(shared: Arc<Shared>) -> Result<()> {
                         views::agent_select(&snap, seen, &cfg, &layout, scr, &mut prims);
                         fp(&[4, latest, scr_fp(scr), seen.len() as u64, shared.config_gen()])
                     }
-                    Phase::Ingame if cfg.show_scoreboard && Keys::down(cfg.hold_key) && snap.is_deathmatch() => {
-                        // Same settle-then-read as below, for deathmatch's single list.
+                    Phase::Ingame if cfg.show_scoreboard && Keys::down(cfg.hold_key) => {
+                        // The table is looked for every frame until two reads agree (it
+                        // has stopped animating in), then a few times a second to follow
+                        // it: rows that swap, guns that change, or the table going away
+                        // (shop open). Nothing is drawn unless it's really on screen;
+                        // the moment it is, the last read is drawn while the new settles.
+                        let dm = snap.is_deathmatch();
                         let since = *reads.tab_since.get_or_insert_with(Instant::now);
-                        if !reads.fresh && since.elapsed() < Duration::from_millis(1500) {
-                            if let Some(found) = views::locate_deathmatch(&layout, scr, snap.players.len()) {
-                                let settled = reads.pending_dm.as_ref().is_some_and(|p| found.settled_with(p));
-                                if settled || since.elapsed() >= Duration::from_millis(1200) {
-                                    reads.fresh = true;
-                                    let seen = views::read_list(&snap, &shared.content(), |i| views::Probe {
-                                        portrait: views::dm_portrait(found.rows[i]),
-                                        is_self: found.self_row == Some(i),
-                                    });
-                                    reads.board_dm = Some((seen, found));
+                        let now = Instant::now();
+                        let due = (!reads.fresh && since.elapsed() < Duration::from_millis(1500)) || reads.next_scan.is_none_or(|t| now >= t);
+                        if due {
+                            reads.next_scan = Some(now + Duration::from_millis(if reads.fresh { 300 } else { 200 }));
+                            let content = shared.content();
+                            let waited = since.elapsed() >= Duration::from_millis(1200);
+                            let mut hit = false;
+                            if dm {
+                                if let Some(found) = views::locate_deathmatch(&layout, scr, snap.players.len()) {
+                                    hit = true;
+                                    if reads.fresh || waited || reads.pending_dm.as_ref().is_some_and(|p| found.settled_with(p)) {
+                                        let seen = views::read_list(&snap, &content, |i| views::Probe {
+                                            portrait: views::dm_portrait(found.rows[i]),
+                                            is_self: found.self_row == Some(i),
+                                        });
+                                        if !reads.fresh {
+                                            tray::log(&format!("deathmatch board: row {:.0},{:.0} you {:?}", found.at[0], found.at[1], found.self_row));
+                                        }
+                                        reads.fresh = true;
+                                        reads.board_dm = Some((seen, found));
+                                        reads.pending_dm = None;
+                                        reads.matches += 1;
+                                    } else {
+                                        reads.pending_dm = Some(found);
+                                    }
+                                }
+                            } else {
+                                let mut found = views::locate_scoreboard(&layout, scr, &content);
+                                if found.at.is_some() {
+                                    hit = true;
+                                    if reads.fresh || waited || reads.pending.as_ref().is_some_and(|p| found.settled_with(p)) {
+                                        let sb = found.layout.scoreboard.clone();
+                                        let seen = views::read_slots(&snap, &content, &[true, false], |ally, i| views::Probe {
+                                            portrait: scr.map(sb.row(ally, i).inner(sb.icon)),
+                                            is_self: ally && found.self_row == Some(i),
+                                        });
+                                        if !reads.fresh {
+                                            tray::log(&format!("scoreboard: at {:?} you {:?} guns {}", found.at, found.self_row, found.guns.len()));
+                                        }
+                                        // A table that hasn't moved keeps its exact place (no wobble).
+                                        if let Some((_, old)) = reads.board.take() {
+                                            if reads.fresh && found.settled_with(&old) {
+                                                found.layout = old.layout;
+                                                found.at = old.at;
+                                                found.ui = old.ui;
+                                            }
+                                        }
+                                        reads.fresh = true;
+                                        reads.board = Some((seen, found));
+                                        reads.pending = None;
+                                        reads.matches += 1;
+                                    } else {
+                                        reads.pending = Some(found);
+                                    }
+                                }
+                            }
+                            if hit {
+                                reads.live = true;
+                                reads.misses = 0;
+                            } else {
+                                reads.misses = reads.misses.saturating_add(1);
+                                if reads.misses >= 2 {
+                                    reads.live = false;
+                                    reads.fresh = false;
+                                    reads.pending = None;
                                     reads.pending_dm = None;
-                                    reads.matches += 1;
-                                } else {
-                                    reads.pending_dm = Some(found);
                                 }
                             }
                         }
-                        match &reads.board_dm {
-                            Some((b, found)) => {
+                        match (&reads.board, &reads.board_dm) {
+                            _ if !reads.live => 1,
+                            (_, Some((b, found))) if dm => {
                                 views::scoreboard_dm(&snap, b, &cfg, found, scr, &mut prims);
                                 fp(&[7, latest, scr_fp(scr), shared.config_gen(), reads.matches])
                             }
-                            None => 1,
-                        }
-                    }
-                    Phase::Ingame if cfg.show_scoreboard && Keys::down(cfg.hold_key) => {
-                        // Instant: the last read of this match is drawn the moment Tab goes
-                        // down. Meanwhile the table is read every frame (30 ms); once two
-                        // reads agree it has stopped animating in, rows are matched again
-                        // and the drawing corrects itself if the order changed.
-                        let since = *reads.tab_since.get_or_insert_with(Instant::now);
-                        if !reads.fresh && since.elapsed() < Duration::from_millis(1500) {
-                            let found = views::locate_scoreboard(&layout, scr, &shared.content());
-                            let settled = reads.pending.as_ref().is_some_and(|p| found.settled_with(p));
-                            // Give up waiting after 1.2 s (e.g. a frozen frame) and use the latest.
-                            if settled || since.elapsed() >= Duration::from_millis(1200) {
-                                reads.fresh = true;
-                                let sb = found.layout.scoreboard.clone();
-                                let seen = views::read_slots(&snap, &shared.content(), &[true, false], |ally, i| views::Probe {
-                                    portrait: scr.map(sb.row(ally, i).inner(sb.icon)),
-                                    is_self: ally && found.self_row == Some(i),
-                                });
-                                reads.board = Some((seen, found));
-                                reads.pending = None;
-                                reads.matches += 1;
-                            } else {
-                                reads.pending = Some(found);
-                            }
-                        }
-                        match &reads.board {
-                            Some((b, found)) => {
+                            (Some((b, found)), _) if !dm => {
                                 views::scoreboard(&snap, b, &cfg, found, scr, &mut prims);
                                 fp(&[5, latest, scr_fp(scr), shared.config_gen(), reads.matches])
                             }
-                            None => 1,
+                            _ => 1,
                         }
                     }
                     Phase::Ingame => {
-                        // Tab up: keep the last boards (drawn instantly next press).
+                        // Tab up: keep the last boards (drawn as soon as the table shows
+                        // next press), minus the guns, which change every round.
                         reads.tab_since = None;
                         reads.fresh = false;
+                        reads.live = false;
+                        reads.misses = 0;
+                        reads.next_scan = None;
                         reads.pending = None;
                         reads.pending_dm = None;
-                        if !cfg.show_loading {
-                            1
-                        } else {
-                            // Check for the VS screen a few times a second (five 1 px reads).
-                            if reads.loading_checked.is_none_or(|t| t.elapsed() > Duration::from_millis(90)) {
-                                reads.loading_checked = Some(Instant::now());
-                                let dm = snap.is_deathmatch();
-                                reads.loading_up = if dm { views::loading_visible_dm(&layout, scr) } else { views::loading_visible(&layout, scr) };
-                                if dm && reads.loading_up && reads.loading_due() {
-                                    let l = &layout.loading;
-                                    reads.loading = Some(views::read_list(&snap, &shared.content(), |k| views::Probe {
-                                        portrait: scr.map(views::dm_slot(&layout, k).inner(l.dm_icon)),
-                                        is_self: false,
-                                    }));
-                                } else if !dm && reads.loading_up && reads.loading_due() {
-                                    let l = &layout.loading;
-                                    reads.loading = Some(views::read_slots(&snap, &shared.content(), &[true, false], |ally, i| {
-                                        let card = scr.map(l.card(ally, i));
-                                        views::Probe {
-                                            portrait: scr.map(l.card(ally, i).inner(if ally { l.ally_icon } else { l.enemy_icon })),
-                                            // Your card's edge strip is yellow.
-                                            is_self: ally && views::yellow_share(Rect { x: card.x + 1.0, y: card.y + card.h * 0.3, w: 3.0, h: card.h * 0.4 }) > 0.5,
-                                        }
-                                    }));
-                                }
-                            }
-                            match (&reads.loading, reads.loading_up) {
-                                (Some(seen), true) if snap.is_deathmatch() => {
-                                    views::loading_dm(&snap, seen, &cfg, &layout, scr, &mut prims);
-                                    fp(&[8, latest, scr_fp(scr), shared.config_gen(), reads.loading_reads.1 as u64])
-                                }
-                                (Some(seen), true) => {
-                                    views::loading(&snap, seen, &cfg, &layout, scr, &mut prims);
-                                    fp(&[6, latest, scr_fp(scr), shared.config_gen(), reads.loading_reads.1 as u64])
-                                }
-                                _ => 1,
-                            }
+                        if let Some((_, f)) = &mut reads.board {
+                            f.guns.clear();
                         }
+                        loading_view(&mut reads, &snap, &cfg, &layout, scr, &shared, latest, &mut prims).unwrap_or(1)
                     }
                     _ => 1,
                 },
             };
-            let tab_up = Keys::down(cfg.hold_key) && snap.phase == Phase::Ingame && !snap.is_deathmatch();
-            let fscale = match (scr, reads.loading_up && snap.phase == Phase::Ingame) {
+            let tab_up = reads.live && snap.phase == Phase::Ingame && !snap.is_deathmatch();
+            let fscale = match (scr, reads.loading_up && snap.phase != Phase::Menus) {
                 // Scoreboard text follows the table's real size.
                 (Some(_), false) if tab_up && reads.board.is_some() => reads.board.as_ref().map_or(1.0, |b| b.1.ui),
                 (Some(s), true) => s.lscale,

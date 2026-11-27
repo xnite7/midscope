@@ -183,8 +183,21 @@ pub struct Found {
     pub at: Option<[f32; 4]>,
     /// Pixels per layout unit for this table (its real size on screen).
     pub ui: f32,
-    /// Vandals and Phantoms in the loadout column: (ally?, row, gun, where on screen).
-    pub guns: Vec<(bool, usize, String, Rect)>,
+    /// Vandals and Phantoms in the loadout column.
+    pub guns: Vec<Gun>,
+}
+
+/// A gun seen in a row's loadout cell.
+pub struct Gun {
+    pub ally: bool,
+    pub row: usize,
+    pub name: String,
+    /// The silhouette's box on screen.
+    pub at: Rect,
+    /// The loadout cell on screen, and pixels that paint the silhouette out
+    /// with the row's own colours (see-through everywhere else).
+    pub cell: Rect,
+    pub cover: std::sync::Arc<paint::Patch>,
 }
 
 impl Found {
@@ -217,7 +230,6 @@ pub fn locate_scoreboard(layout: &Layout, scr: Screen, content: &Content) -> Fou
         scan::find(&img, scan::Guess { left: est_ally.x - x0, right: est_ally.x + est_ally.w - x0, pitch })
     });
     let Some(f) = f else {
-        tray::log("scoreboard: not found, using saved positions");
         return found;
     };
     // Back to layout units, relative to where the anchors put things.
@@ -246,45 +258,46 @@ pub fn locate_scoreboard(layout: &Layout, scr: Screen, content: &Content) -> Fou
         }
     }
     found.at = Some([f.left + x0, f.ally_top + y0, f.enemy_top + y0, f.pitch]);
-    found.guns = read_guns(&img, &f, content)
-        .into_iter()
-        .map(|(ally, row, gun, r)| (ally, row, gun, Rect { x: r.x + x0, y: r.y + y0, ..r }))
-        .collect();
-    tray::log(&format!(
-        "scoreboard: left {} ally {} enemy {} row {:.1}px you {:?}",
-        (f.left + x0) as i32,
-        (f.ally_top + y0) as i32,
-        (f.enemy_top + y0) as i32,
-        f.pitch,
-        f.self_row
-    ));
+    let (ox, oy) = ((x0 as i32) as f32, (y0 as i32) as f32);
+    found.guns = read_guns(&img, &f, content);
+    for g in &mut found.guns {
+        g.at = Rect { x: g.at.x + ox, y: g.at.y + oy, ..g.at };
+        g.cell = Rect { x: g.cell.x + ox, y: g.cell.y + oy, ..g.cell };
+    }
     found
 }
 
 /// Reads the gun in each row's loadout cell by its silhouette (white, or
-/// yellow on your row) and keeps the Vandals and Phantoms, with the box the
-/// silhouette sits in. Positions are in capture pixels.
-fn read_guns(img: &scan::Img, f: &scan::Found, content: &Content) -> Vec<(bool, usize, String, Rect)> {
+/// yellow on your row) and keeps the Vandals and Phantoms. For each, also
+/// makes the pixels that paint the silhouette out: every silhouette pixel
+/// (and a 2 px rim for its soft edge) takes the row colour found just left
+/// of it, so no box shows behind the skin. Positions are in capture pixels.
+fn read_guns(img: &scan::Img, f: &scan::Found, content: &Content) -> Vec<Gun> {
     let p = f.pitch;
     let (cw, ch) = ((3.4 * p) as usize, (p - 6.0 * p / 34.0) as usize);
     let mut out = Vec::new();
     for (ally, top) in [(true, f.ally_top), (false, f.enemy_top)] {
         for row in 0..5 {
             let (x0, y0) = ((f.left + 14.2 * p) as usize, (top + p * row as f32 + 3.0 * p / 34.0) as usize);
-            if x0 + cw > img.w || y0 + ch > img.h {
+            if cw < 8 || ch < 4 || x0 + cw > img.w || y0 + ch > img.h {
                 continue;
             }
-            let on = |x: usize, y: usize| {
+            let px = |x: usize, y: usize| {
                 let i = ((y0 + y) * img.w + x0 + x) * 4;
-                let (b, g, r) = (img.px[i] as i32, img.px[i + 1] as i32, img.px[i + 2] as i32);
-                (r > 200 && g > 200 && b > 200) || (r > 170 && g > 170 && b < r.min(g) - 40)
+                [img.px[i], img.px[i + 1], img.px[i + 2]]
             };
+            let lit: Vec<bool> = (0..cw * ch)
+                .map(|k| {
+                    let [b, g, r] = px(k % cw, k / cw).map(|v| v as i32);
+                    (r > 200 && g > 200 && b > 200) || (r > 170 && g > 170 && b < r.min(g) - 40)
+                })
+                .collect();
+            let on = |x: usize, y: usize| lit[y * cw + x];
             let Some(mask) = midscope_core::content::shape_mask(cw, ch, on) else { continue };
             let Some((gun, score)) = midscope_core::content::which_gun(content, &mask) else { continue };
             if score < 0.7 || !matches!(gun, "Vandal" | "Phantom") {
                 continue;
             }
-            // Where the silhouette is, to lay the skin over it.
             let (mut bx0, mut by0, mut bx1, mut by1) = (cw, ch, 0, 0);
             for y in 0..ch {
                 for x in 0..cw {
@@ -296,8 +309,29 @@ fn read_guns(img: &scan::Img, f: &scan::Found, content: &Content) -> Vec<(bool, 
                     }
                 }
             }
-            let r = Rect { x: (x0 + bx0) as f32, y: (y0 + by0) as f32, w: (bx1 - bx0 + 1) as f32, h: (by1 - by0 + 1) as f32 };
-            out.push((ally, row, gun.to_owned(), r));
+            // The cover: silhouette pixels grown by 2, in the colour to their left.
+            let near = |x: usize, y: usize| {
+                (y.saturating_sub(2)..=(y + 2).min(ch - 1)).any(|yy| (x.saturating_sub(2)..=(x + 2).min(cw - 1)).any(|xx| on(xx, yy)))
+            };
+            let mut bgra = vec![0u8; cw * ch * 4];
+            for y in 0..ch {
+                let mut last = px(0, y);
+                for x in 0..cw {
+                    if near(x, y) {
+                        bgra[(y * cw + x) * 4..][..4].copy_from_slice(&[last[0], last[1], last[2], 255]);
+                    } else {
+                        last = px(x, y);
+                    }
+                }
+            }
+            out.push(Gun {
+                ally,
+                row,
+                name: gun.to_owned(),
+                at: Rect { x: (x0 + bx0) as f32, y: (y0 + by0) as f32, w: (bx1 - bx0 + 1) as f32, h: (by1 - by0 + 1) as f32 },
+                cell: Rect { x: x0 as f32, y: y0 as f32, w: cw as f32, h: ch as f32 },
+                cover: std::sync::Arc::new(paint::Patch { w: cw, h: ch, bgra }),
+            });
         }
     }
     out
@@ -330,7 +364,6 @@ pub fn locate_deathmatch(layout: &Layout, scr: Screen, n: usize) -> Option<Found
     let (left, top) = (f.left + x0, f.top + y0);
     let width = scan::TABLE_W * f.pitch;
     let rows = (0..n).map(|k| Rect { x: left, y: top + f.pitch * k as f32, w: width, h: f.pitch * 0.97 }).collect();
-    tray::log(&format!("deathmatch board: left {} top {} row {:.1}px you {:?}", left as i32, top as i32, f.pitch, f.self_row));
     Some(FoundDm { rows, self_row: f.self_row, at: [left, top, f.pitch] })
 }
 
@@ -678,15 +711,14 @@ pub fn scoreboard(snap: &Snapshot, seen: &Seen, cfg: &Config, found: &Found, scr
     // Skins go on the guns themselves: the player's own Vandal / Phantom
     // picture laid over the white silhouette in the loadout column.
     if cfg.show_skins {
-        for (ally, i, gun, at) in &found.guns {
-            let Some((p_, _)) = player(snap, seen, *ally, *i) else { continue };
-            let Some(url) = p_.skin_for(gun).and_then(|k| k.art.clone()) else { continue };
+        for g in &found.guns {
+            let Some((p_, _)) = player(snap, seen, g.ally, g.row) else { continue };
+            let Some(url) = p_.skin_for(&g.name).and_then(|k| k.art.clone()) else { continue };
             let Some((iw, ih)) = midscope_core::content::skin_art_size(&url) else { continue };
-            // Cover the silhouette with the row's own colour, then the skin on top,
-            // as wide as the silhouette and centred on it.
-            let pad = 2.0 * s;
-            let bg = found.bg[usize::from(!*ally)][*i];
-            out.push(Prim::Fill(Rect { x: at.x - pad, y: at.y - pad, w: at.w + 2.0 * pad, h: at.h + 2.0 * pad }, bg, 1.0));
+            // Paint the silhouette out (only its own pixels), then the skin over
+            // where it was, as wide as the silhouette and centred on it.
+            out.push(Prim::Pixels(g.cover.clone(), g.cell));
+            let at = g.at;
             let w = at.w * 1.04;
             let h = w * ih as f32 / iw.max(1) as f32;
             out.push(Prim::Image(paint::Img::Skin(url), Rect { x: at.x + at.w / 2.0 - w / 2.0, y: at.y + at.h / 2.0 - h / 2.0, w, h }));
